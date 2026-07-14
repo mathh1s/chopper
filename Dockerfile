@@ -20,8 +20,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir yt-dlp \
-    && if [ "$WITH_DEMUCS" = "1" ]; then pip install --no-cache-dir demucs; fi
+RUN pip install --no-cache-dir yt-dlp
+
+# demucs does not list numpy as a dependency, and torch treats it as optional,
+# so a plain "pip install demucs" gives you a torch that cannot initialise numpy
+# and a demucs that dies on import. Install it explicitly. Pinned under 2.0
+# because the torch and torchaudio wheels are built against the 1.x ABI.
+#
+# The model weights are pulled at build time too. Otherwise the first stem split
+# quietly stalls for a few minutes downloading a few hundred megabytes, which
+# looks exactly like a hang.
+ENV TORCH_HOME=/opt/torch
+RUN if [ "$WITH_DEMUCS" = "1" ]; then \
+        pip install --no-cache-dir "numpy<2" demucs \
+        && python -c "from demucs.pretrained import get_model; get_model('htdemucs')" \
+        && python -c "import numpy, torch; torch.zeros(1).numpy(); print('numpy ok', numpy.__version__)" ; \
+    fi
 
 WORKDIR /app
 COPY --from=build /out/chopper /app/chopper

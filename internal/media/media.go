@@ -164,6 +164,14 @@ func (m *Media) Stems(ctx context.Context, sourceFile string) (map[string]*Info,
 	in := filepath.Join(m.cfg.AudioDir(), sourceFile)
 	if _, err := run(sepCtx, m.cfg.Demucs,
 		"-n", m.cfg.DemucsModel, "--wav", "-o", dir, in); err != nil {
+		// A demucs run on cpu wants several gigabytes of ram for a full length
+		// track. When the kernel oom killer takes it there is no stderr at all,
+		// just a dead process, so say so rather than showing an empty error.
+		msg := err.Error()
+		if strings.Contains(msg, "signal: killed") || strings.Contains(msg, "exit status 137") {
+			return nil, errors.New("demucs was killed, most likely out of memory. " +
+				"stem separation on cpu needs several gigabytes free for a full track")
+		}
 		return nil, fmt.Errorf("demucs failed: %w", err)
 	}
 
