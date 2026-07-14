@@ -56,6 +56,8 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("POST /api/projects", a.guard(a.createProject))
 	mux.HandleFunc("GET /api/projects/{id}", a.guard(a.getProject))
 	mux.HandleFunc("PUT /api/projects/{id}", a.guard(a.saveProject))
+	mux.HandleFunc("POST /api/projects/{id}/sources", a.guard(a.addProjectSource))
+	mux.HandleFunc("DELETE /api/projects/{id}/sources/{sid}", a.guard(a.removeProjectSource))
 	mux.HandleFunc("DELETE /api/projects/{id}", a.guard(a.deleteProject))
 
 	mux.Handle("GET /", a.static())
@@ -398,11 +400,68 @@ func (a *API) saveProject(w http.ResponseWriter, r *http.Request) {
 	if body.BeatsPerBar <= 0 {
 		body.BeatsPerBar = 4
 	}
+	if body.Bars <= 0 {
+		body.Bars = 4
+	}
 	if body.Slices == nil {
 		body.Slices = []store.Slice{}
 	}
+	if body.Sources == nil {
+		body.Sources = []store.ProjectSource{}
+	}
+	if body.Events == nil {
+		body.Events = []store.PerfEvent{}
+	}
 
 	p, err := a.st.SaveProject(r.Context(), body)
+	if err != nil {
+		notFound(w, err)
+		return
+	}
+	ok(w, p)
+}
+
+func (a *API) addProjectSource(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		fail(w, http.StatusBadRequest, "Bad id.")
+		return
+	}
+	var body struct {
+		SourceID int64 `json:"source_id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
+		fail(w, http.StatusBadRequest, "Send a source_id.")
+		return
+	}
+	if err := a.st.AddProjectSource(r.Context(), id, body.SourceID); err != nil {
+		fail(w, http.StatusBadRequest, "Could not add that source: "+err.Error())
+		return
+	}
+	p, err := a.st.GetProject(r.Context(), id)
+	if err != nil {
+		notFound(w, err)
+		return
+	}
+	ok(w, p)
+}
+
+func (a *API) removeProjectSource(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		fail(w, http.StatusBadRequest, "Bad id.")
+		return
+	}
+	sid, err := strconv.ParseInt(r.PathValue("sid"), 10, 64)
+	if err != nil {
+		fail(w, http.StatusBadRequest, "Bad source id.")
+		return
+	}
+	if err := a.st.RemoveProjectSource(r.Context(), id, sid); err != nil {
+		oops(w, err)
+		return
+	}
+	p, err := a.st.GetProject(r.Context(), id)
 	if err != nil {
 		notFound(w, err)
 		return

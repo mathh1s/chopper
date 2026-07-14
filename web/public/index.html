@@ -65,6 +65,8 @@
     <!-- workbench -->
     <section id="bench" hidden>
 
+      <div class="source-tabs" id="source-tabs"></div>
+
       <div class="card overview-card">
         <canvas id="overview"></canvas>
       </div>
@@ -75,7 +77,7 @@
           <span><kbd>space</kbd> play</span>
           <span><kbd>L</kbd> loop</span>
           <span><kbd>S</kbd> slice selection</span>
-          <span><kbd>1</kbd> to <kbd>9</kbd> trigger</span>
+          <span><kbd>1</kbd> to <kbd>9</kbd> trigger pad</span>
           <span><kbd>scroll</kbd> pan · <kbd>ctrl</kbd>+<kbd>scroll</kbd> zoom</span>
         </div>
       </div>
@@ -181,6 +183,16 @@
             <button class="btn" id="btn-match">Preview at target</button>
           </div>
 
+          <div class="grid-row">
+            <label class="field">
+              <span>Project tempo <em class="hint">what the pads run at</em></span>
+              <input id="proj-bpm" class="mono" type="number" step="0.01" min="0" value="0">
+            </label>
+            <label class="bake">
+              <input type="checkbox" id="sync" checked> warp this source to it
+            </label>
+          </div>
+
           <div class="analysis" id="analysis">Run detect to fill this in.</div>
         </div>
 
@@ -231,8 +243,51 @@
       </div>
 
       <div class="card pads-card">
-        <h3>Pads <span class="hint">click to trigger, hold shift to loop</span></h3>
+        <div class="slices-head">
+          <h3>Pad bank <span class="hint">chops layer, they do not cut each other off</span></h3>
+          <div class="row">
+            <button class="btn btn-primary" id="btn-perf-play">Play</button>
+            <button class="btn toggle" id="btn-perf-rec">Record</button>
+            <button class="btn" id="btn-perf-stop">Stop</button>
+            <button class="btn btn-ghost" id="btn-perf-undo">Undo hit</button>
+            <button class="btn btn-ghost" id="btn-perf-clear">Clear take</button>
+          </div>
+        </div>
+
+        <div class="grid-row">
+          <label class="field">
+            <span>Loop (bars)</span>
+            <input id="bars" class="mono" type="number" min="1" max="16" value="4">
+          </label>
+          <label class="field">
+            <span>Quantize</span>
+            <select id="quantize">
+              <option value="0">Off</option>
+              <option value="1">1/4</option>
+              <option value="0.5">1/8</option>
+              <option value="0.25" selected>1/16</option>
+              <option value="0.125">1/32</option>
+            </select>
+          </label>
+          <label class="bake"><input type="checkbox" id="metronome" checked> metronome</label>
+          <label class="bake"><input type="checkbox" id="count-in" checked> count in</label>
+          <div class="sel-meta" id="event-count">0 hits</div>
+        </div>
+
+        <canvas id="lane"></canvas>
+
         <div class="pads" id="pads"></div>
+
+        <div class="grid-row">
+          <label class="field">
+            <span>Bounce how many loops</span>
+            <div class="row">
+              <input id="bounce-loops" class="mono" type="number" min="1" max="16" value="2">
+              <button class="btn btn-primary" id="btn-bounce">Bounce take (WAV)</button>
+              <button class="btn" id="btn-midi">MIDI</button>
+            </div>
+          </label>
+        </div>
       </div>
 
       <div class="card slices-card">
@@ -310,5 +365,6 @@
 
 <script src="/app.js"></script>
 <script src="/analysis.js"></script>
+<script src="/perf.js"></script>
 </body>
 </html>

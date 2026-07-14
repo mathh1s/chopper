@@ -6,6 +6,7 @@ import (
 	"embed"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -33,11 +34,31 @@ type Source struct {
 type Slice struct {
 	ID       int64   `json:"id"`
 	Idx      int     `json:"idx"`
+	SourceID int64   `json:"source_id"`
 	Name     string  `json:"name"`
 	StartSec float64 `json:"start_sec"`
 	EndSec   float64 `json:"end_sec"`
 	Color    string  `json:"color"`
 	Reverse  bool    `json:"reverse"`
+}
+
+// ProjectSource is one source loaded into a pad bank, with the tempo and grid that
+// belong to that source rather than to the project.
+type ProjectSource struct {
+	SourceID    int64   `json:"source_id"`
+	Position    int     `json:"position"`
+	BPM         float64 `json:"bpm"`
+	GridOffset  float64 `json:"grid_offset"`
+	DetectedKey string  `json:"detected_key"`
+	Pitch       float64 `json:"pitch"`
+	Sync        bool    `json:"sync"`
+	Source      *Source `json:"source,omitempty"`
+}
+
+// PerfEvent is one recorded pad hit, at a position inside the loop.
+type PerfEvent struct {
+	SliceIdx int     `json:"slice_idx"`
+	AtSec    float64 `json:"at_sec"`
 }
 
 type Project struct {
@@ -52,8 +73,11 @@ type Project struct {
 	PitchLinked bool      `json:"pitch_linked"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
-	Slices      []Slice   `json:"slices"`
-	Source      *Source   `json:"source,omitempty"`
+	Bars        int             `json:"bars"`
+	Slices      []Slice         `json:"slices"`
+	Sources     []ProjectSource `json:"sources"`
+	Events      []PerfEvent     `json:"events"`
+	Source      *Source         `json:"source,omitempty"`
 }
 
 type Store struct{ pool *pgxpool.Pool }
@@ -209,19 +233,28 @@ func (s *Store) CreateProject(ctx context.Context, sourceID int64, name string) 
 	err := s.pool.QueryRow(ctx, `
         insert into projects (source_id, name)
         values ($1, $2)
-        returning id, source_id, name, bpm, grid_offset, beats_per_bar, detected_key, pitch, pitch_linked, created_at, updated_at`,
+        returning id, source_id, name, bpm, grid_offset, beats_per_bar, detected_key, pitch, pitch_linked, bars, created_at, updated_at`,
 		sourceID, name).Scan(&p.ID, &p.SourceID, &p.Name, &p.BPM, &p.GridOffset,
-		&p.BeatsPerBar, &p.DetectedKey, &p.Pitch, &p.PitchLinked, &p.CreatedAt, &p.UpdatedAt)
+		&p.BeatsPerBar, &p.DetectedKey, &p.Pitch, &p.PitchLinked, &p.Bars, &p.CreatedAt, &p.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	_, err = s.pool.Exec(ctx, `
+        insert into project_sources (project_id, source_id, position)
+        values ($1, $2, 0)
+        on conflict (project_id, source_id) do nothing`, p.ID, sourceID)
 	if err != nil {
 		return nil, err
 	}
 	p.Slices = []Slice{}
+	p.Sources = []ProjectSource{}
+	p.Events = []PerfEvent{}
 	return &p, nil
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 	rows, err := s.pool.Query(ctx, `
-        select id, source_id, name, bpm, grid_offset, beats_per_bar, detected_key, pitch, pitch_linked, created_at, updated_at
+        select id, source_id, name, bpm, grid_offset, beats_per_bar, detected_key, pitch, pitch_linked, bars, created_at, updated_at
         from projects order by updated_at desc`)
 	if err != nil {
 		return nil, err
@@ -232,11 +265,13 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 	for rows.Next() {
 		var p Project
 		err := rows.Scan(&p.ID, &p.SourceID, &p.Name, &p.BPM, &p.GridOffset,
-			&p.BeatsPerBar, &p.DetectedKey, &p.Pitch, &p.PitchLinked, &p.CreatedAt, &p.UpdatedAt)
+			&p.BeatsPerBar, &p.DetectedKey, &p.Pitch, &p.PitchLinked, &p.Bars, &p.CreatedAt, &p.UpdatedAt)
 		if err != nil {
 			return nil, err
 		}
 		p.Slices = []Slice{}
+		p.Sources = []ProjectSource{}
+		p.Events = []PerfEvent{}
 		out = append(out, p)
 	}
 	return out, rows.Err()
@@ -245,15 +280,15 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 func (s *Store) GetProject(ctx context.Context, id int64) (*Project, error) {
 	var p Project
 	err := s.pool.QueryRow(ctx, `
-        select id, source_id, name, bpm, grid_offset, beats_per_bar, detected_key, pitch, pitch_linked, created_at, updated_at
+        select id, source_id, name, bpm, grid_offset, beats_per_bar, detected_key, pitch, pitch_linked, bars, created_at, updated_at
         from projects where id = $1`, id).Scan(&p.ID, &p.SourceID, &p.Name, &p.BPM, &p.GridOffset,
-		&p.BeatsPerBar, &p.DetectedKey, &p.Pitch, &p.PitchLinked, &p.CreatedAt, &p.UpdatedAt)
+		&p.BeatsPerBar, &p.DetectedKey, &p.Pitch, &p.PitchLinked, &p.Bars, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 
 	rows, err := s.pool.Query(ctx, `
-        select id, idx, name, start_sec, end_sec, color, reverse
+        select id, idx, coalesce(source_id, 0), name, start_sec, end_sec, color, reverse
         from slices where project_id = $1 order by idx asc`, id)
 	if err != nil {
 		return nil, err
@@ -263,12 +298,21 @@ func (s *Store) GetProject(ctx context.Context, id int64) (*Project, error) {
 	p.Slices = []Slice{}
 	for rows.Next() {
 		var sl Slice
-		if err := rows.Scan(&sl.ID, &sl.Idx, &sl.Name, &sl.StartSec, &sl.EndSec, &sl.Color, &sl.Reverse); err != nil {
+		if err := rows.Scan(&sl.ID, &sl.Idx, &sl.SourceID, &sl.Name, &sl.StartSec, &sl.EndSec, &sl.Color, &sl.Reverse); err != nil {
 			return nil, err
 		}
 		p.Slices = append(p.Slices, sl)
 	}
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	p.Sources, err = s.projectSources(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	p.Events, err = s.projectEvents(ctx, id)
+	if err != nil {
 		return nil, err
 	}
 
@@ -278,6 +322,101 @@ func (s *Store) GetProject(ctx context.Context, id int64) (*Project, error) {
 	}
 	p.Source = src
 	return &p, nil
+}
+
+func (s *Store) projectSources(ctx context.Context, id int64) ([]ProjectSource, error) {
+	rows, err := s.pool.Query(ctx, `
+        select ps.source_id, ps.position, ps.bpm, ps.grid_offset, ps.detected_key,
+               ps.pitch, ps.sync, `+prefixed(sourceCols, "s")+`
+        from project_sources ps
+        join sources s on s.id = ps.source_id
+        where ps.project_id = $1
+        order by ps.position asc, ps.source_id asc`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []ProjectSource{}
+	for rows.Next() {
+		var ps ProjectSource
+		var src Source
+		err := rows.Scan(&ps.SourceID, &ps.Position, &ps.BPM, &ps.GridOffset,
+			&ps.DetectedKey, &ps.Pitch, &ps.Sync,
+			&src.ID, &src.Title, &src.Origin, &src.SourceURL, &src.FileName, &src.ParentID,
+			&src.Stem, &src.Duration, &src.SampleRate, &src.Channels, &src.SizeBytes, &src.CreatedAt)
+		if err != nil {
+			return nil, err
+		}
+		ps.Source = &src
+		out = append(out, ps)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) projectEvents(ctx context.Context, id int64) ([]PerfEvent, error) {
+	rows, err := s.pool.Query(ctx, `
+        select slice_idx, at_sec from perf_events
+        where project_id = $1 order by idx asc`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []PerfEvent{}
+	for rows.Next() {
+		var e PerfEvent
+		if err := rows.Scan(&e.SliceIdx, &e.AtSec); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// AddProjectSource loads another source into the pad bank.
+func (s *Store) AddProjectSource(ctx context.Context, projectID, sourceID int64) error {
+	_, err := s.pool.Exec(ctx, `
+        insert into project_sources (project_id, source_id, position)
+        values ($1, $2, coalesce(
+            (select max(position) + 1 from project_sources where project_id = $1), 0))
+        on conflict (project_id, source_id) do nothing`, projectID, sourceID)
+	return err
+}
+
+// RemoveProjectSource drops a source and every slice cut from it.
+func (s *Store) RemoveProjectSource(ctx context.Context, projectID, sourceID int64) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx,
+		`delete from slices where project_id = $1 and source_id = $2`, projectID, sourceID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`delete from project_sources where project_id = $1 and source_id = $2`, projectID, sourceID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func nullableID(id int64) any {
+	if id == 0 {
+		return nil
+	}
+	return id
+}
+
+// prefixed rewrites a bare column list so it can be used in a join.
+func prefixed(cols, alias string) string {
+	parts := strings.Split(cols, ",")
+	for i, c := range parts {
+		parts[i] = alias + "." + strings.TrimSpace(c)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // SaveProject writes the header fields and replaces the slice list wholesale.
@@ -291,9 +430,10 @@ func (s *Store) SaveProject(ctx context.Context, p Project) (*Project, error) {
 	tag, err := tx.Exec(ctx, `
         update projects
         set name = $2, bpm = $3, grid_offset = $4, beats_per_bar = $5,
-            detected_key = $6, pitch = $7, pitch_linked = $8, updated_at = now()
+            detected_key = $6, pitch = $7, pitch_linked = $8, bars = $9, updated_at = now()
         where id = $1`,
-		p.ID, p.Name, p.BPM, p.GridOffset, p.BeatsPerBar, p.DetectedKey, p.Pitch, p.PitchLinked)
+		p.ID, p.Name, p.BPM, p.GridOffset, p.BeatsPerBar, p.DetectedKey,
+		p.Pitch, p.PitchLinked, p.Bars)
 	if err != nil {
 		return nil, err
 	}
@@ -307,9 +447,40 @@ func (s *Store) SaveProject(ctx context.Context, p Project) (*Project, error) {
 
 	for i, sl := range p.Slices {
 		_, err := tx.Exec(ctx, `
-            insert into slices (project_id, idx, name, start_sec, end_sec, color, reverse)
-            values ($1, $2, $3, $4, $5, $6, $7)`,
-			p.ID, i, sl.Name, sl.StartSec, sl.EndSec, sl.Color, sl.Reverse)
+            insert into slices (project_id, idx, source_id, name, start_sec, end_sec, color, reverse)
+            values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			p.ID, i, nullableID(sl.SourceID), sl.Name, sl.StartSec, sl.EndSec, sl.Color, sl.Reverse)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	for _, ps := range p.Sources {
+		_, err := tx.Exec(ctx, `
+            insert into project_sources
+                (project_id, source_id, position, bpm, grid_offset, detected_key, pitch, sync)
+            values ($1, $2, $3, $4, $5, $6, $7, $8)
+            on conflict (project_id, source_id) do update set
+                position = excluded.position,
+                bpm = excluded.bpm,
+                grid_offset = excluded.grid_offset,
+                detected_key = excluded.detected_key,
+                pitch = excluded.pitch,
+                sync = excluded.sync`,
+			p.ID, ps.SourceID, ps.Position, ps.BPM, ps.GridOffset,
+			ps.DetectedKey, ps.Pitch, ps.Sync)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `delete from perf_events where project_id = $1`, p.ID); err != nil {
+		return nil, err
+	}
+	for i, e := range p.Events {
+		_, err := tx.Exec(ctx, `
+            insert into perf_events (project_id, idx, slice_idx, at_sec)
+            values ($1, $2, $3, $4)`, p.ID, i, e.SliceIdx, e.AtSec)
 		if err != nil {
 			return nil, err
 		}

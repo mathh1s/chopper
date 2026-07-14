@@ -20,6 +20,13 @@ Go + Postgres on the back, Web Audio + canvas on the front. One binary, frontend
   exported. Pitch is in semitones and is free of the speed control by default: the audio is
   time stretched underneath so the pitch moves and the tempo does not. Tick "tie to speed"
   to get the old sampler behaviour where pitching up also speeds up.
+- **Layer.** A project is a pad bank, not a single song. Drop as many sources into it as
+  you like. Each keeps its own tempo and grid, because two unrelated records will never
+  agree on either, and gets warped to the project tempo when its chops are triggered. Pads
+  are polyphonic, so chops stack instead of cutting each other off.
+- **Record.** Play the pads over a loop and it keeps the take. Overdub by leaving it
+  running, with quantize, a metronome and a count in. Then bounce the whole thing to one
+  wav, or export it as MIDI and rebuild it in FL from the sliced chops.
 - **Export.** Timestamps to clipboard, JSON, Audacity labels, a wav with your slices
   embedded as cue markers and regions, or a zip of one wav per chop.
 - **Split stems** into drums, bass, vocals and other, if you install demucs. Each stem
@@ -81,7 +88,7 @@ and no more, so do not put it on a public URL and forget about it.
 | `R` | toggle reverse |
 | `S` | slice the current selection |
 | `F` | fit the whole track |
-| `1` to `9`, `0` | trigger pad (hold shift to loop it) |
+| `1` to `9`, `0` | trigger pad (hold shift to loop it for auditioning) |
 | `[` `]` | nudge the selection edges by one snap unit (shift nudges forward) |
 | `delete` | delete the selected slice |
 | scroll | pan |
@@ -104,13 +111,20 @@ If you have not done this before, the workflow is roughly:
 4. **Chop.** Drag a selection over the bars you want (snap will lock it to the grid), then
    either slice it whole with `S`, or use "Chop on grid, every beat" to cut it into pieces
    you can rearrange.
-5. **Export.** Hit "Slice WAVs (zip)". You get one wav per chop plus a timestamps txt.
-6. **In FL Studio.** Drag the wavs onto the playlist or into a sampler channel. Set your
+5. **Layer and play it.** Set a project tempo, then drop a second source into the bank
+   (another record, or a stem of the same one). Its chops get warped to your tempo
+   automatically, so two songs at different BPMs lock together. Hit Record, play the pads,
+   and it keeps what you played. Leave it looping to overdub more on top.
+6. **Export.** "Bounce take (WAV)" gives you the whole performance as one file. "Slice
+   WAVs (zip)" gives you one wav per chop plus a timestamps txt, and "MIDI" gives you the
+   take as notes starting at C1, so you can load the chops into a sampler in FL and have
+   the pattern already played for you.
+7. **In FL Studio.** Drag the wavs onto the playlist or into a sampler channel. Set your
    project tempo, then either timestretch each chop to fit (Channel settings, Time
    stretching, mode Auto or Slice Stretch) or let them play at their natural speed and
    build the beat around the sample's own tempo. If you want the sample pitched, the rate
    slider in chopper already told you the semitone cost of any tempo change.
-7. **Layer your own drums** over the loop, high pass the sample so it does not fight your
+8. **Layer your own drums** over the loop, high pass the sample so it does not fight your
    own kick and bass, and you are basically done.
 
 The "WAV with markers" export is the other route: it gives you the full track with your

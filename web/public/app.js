@@ -18,10 +18,15 @@ const state = {
   sources: [],
   projects: [],
 
-  project: null,     // { id, source_id, name, bpm, grid_offset, beats_per_bar, detected_key, slices }
-  source: null,
-  buffer: null,      // AudioBuffer
-  peaks: null,       // { block, mn, mx, n }
+  // A project is a pad bank. It holds several sources, each with its own tempo and
+  // grid, plus the slices cut from them and a recorded pad performance.
+  project: null,
+  activeSourceId: 0, // the source the waveform editor is currently showing
+  banks: new Map(),  // source_id -> { buffer, peaks, env, onsets, stretch: Map, rev: WeakMap }
+
+  source: null,      // the active source row
+  buffer: null,      // active AudioBuffer, mirrors banks.get(activeSourceId).buffer
+  peaks: null,
 
   view: { start: 0, end: 0 },
   cursor: 0,
@@ -35,12 +40,7 @@ const state = {
   gain: 0.9,
 
   reverse: false,    // transport reverse, applies to what you audition
-  pitch: 0,          // semitones
   pitchLinked: false,// true means pitch just drives speed, like an old sampler
-  bufRev: null,      // reversed copy of the source
-  bufPitch: null,    // time stretched copy for the current pitch
-  bufPitchRev: null,
-  pitchCacheFor: null,
 
   playing: false,
   playRegion: null,  // { start, end, loop }
@@ -48,6 +48,8 @@ const state = {
   playAnchorBuf: 0,
 
   dirty: false,
+  recording: false,  // set by the pad recorder in perf.js
+  env: null,
   onsets: null,      // { times: Float32Array, strength: Float32Array }
 };
 
@@ -113,10 +115,32 @@ function fmtSize(b) {
 
 /* ==== grid maths ==== */
 
-function bpm() { return state.project ? Number(state.project.bpm) || 0 : 0; }
-function offset() { return state.project ? Number(state.project.grid_offset) || 0 : 0; }
+// The row for the source the editor is showing. Tempo, grid and pitch live here,
+// because two unrelated songs will never agree on any of them.
+function activePS() {
+  if (!state.project) return null;
+  return state.project.sources.find((x) => x.source_id === state.activeSourceId) || null;
+}
+function psFor(sourceID) {
+  if (!state.project) return null;
+  return state.project.sources.find((x) => x.source_id === sourceID) || null;
+}
+function bank() { return state.banks.get(state.activeSourceId) || null; }
+
+function bpm() { const ps = activePS(); return ps ? Number(ps.bpm) || 0 : 0; }
+function offset() { const ps = activePS(); return ps ? Number(ps.grid_offset) || 0 : 0; }
 function bpb() { return state.project ? Number(state.project.beats_per_bar) || 4 : 4; }
+function projectBpm() { return state.project ? Number(state.project.bpm) || 0 : 0; }
 function secPerBeat() { const b = bpm(); return b > 0 ? 60 / b : 0; }
+
+// How much a source has to be sped up or slowed down to sit at the project tempo.
+function warpFor(ps) {
+  if (!ps || !ps.sync) return 1;
+  const src = Number(ps.bpm) || 0;
+  const proj = projectBpm();
+  if (!src || !proj) return 1;
+  return proj / src;
+}
 
 // Resolve the snap dropdown into a length in beats. 0 means snapping is off.
 function snapBeats() {
@@ -181,14 +205,52 @@ function stopAudio() {
    When pitch is tied to speed there is no stretch at all, the ratio just folds into
    playbackRate, which is exactly what a sampler does when you play a key higher. */
 
+function semisToRatio(st) { return st ? Math.pow(2, st / 12) : 1; }
+
 function pitchRatio() {
-  if (!state.pitch) return 1;
-  return Math.pow(2, state.pitch / 12);
+  const ps = activePS();
+  return semisToRatio(ps ? Number(ps.pitch) || 0 : 0);
 }
 
 // How much longer the buffer we are actually playing is than the original.
+// The editor auditions a source at its own tempo, so no warp is folded in here.
 function timeScale() {
-  return (state.pitch && !state.pitchLinked) ? pitchRatio() : 1;
+  return state.pitchLinked ? 1 : pitchRatio();
+}
+
+/* Stretch factor and playback rate for a given source.
+
+   We want the output pitch multiplied by P and the output length divided by W, where
+   W is the warp needed to reach the project tempo. Stretching a buffer by k makes it k
+   times longer and leaves the pitch alone. Playing at rate r shortens it by r and
+   raises the pitch by r. So length = k/r and pitch = r, and solving both gives
+   r = P and k = P / W.
+
+   In tied mode there is no stretching, so pitch and speed cannot be separated and both
+   just ride on the playback rate. That is what a hardware sampler does. */
+function voiceParams(ps) {
+  const P = semisToRatio(ps ? Number(ps.pitch) || 0 : 0);
+  const W = warpFor(ps);
+  if (state.pitchLinked) return { k: 1, rate: P * W };
+  return { k: P / W, rate: P };
+}
+
+function stretchedFor(b, k) {
+  if (!b || !b.buffer) return null;
+  if (Math.abs(k - 1) < 1e-4) return b.buffer;
+  const key = k.toFixed(4);
+  if (!b.stretch) b.stretch = new Map();
+  if (!b.stretch.has(key)) {
+    if (b.stretch.size > 3) b.stretch.clear();
+    b.stretch.set(key, timeStretch(b.buffer, k));
+  }
+  return b.stretch.get(key);
+}
+
+function reversedOf(b, buf) {
+  if (!b.rev) b.rev = new WeakMap();
+  if (!b.rev.has(buf)) b.rev.set(buf, reverseBuffer(buf));
+  return b.rev.get(buf);
 }
 
 // playbackRate the node needs to run at.
@@ -201,6 +263,12 @@ function nodeRate() {
   return state.rate * pitchRatio();
 }
 
+// Everything the editor plays belongs to the active source.
+function activeSlices() {
+  if (!state.project) return [];
+  return state.project.slices.filter((s) => s.source_id === state.activeSourceId);
+}
+
 function reverseBuffer(buf) {
   const out = actx.createBuffer(buf.numberOfChannels, buf.length, buf.sampleRate);
   for (let c = 0; c < buf.numberOfChannels; c++) {
@@ -211,17 +279,12 @@ function reverseBuffer(buf) {
   return out;
 }
 
-// The buffer we hand to the node, given whether this playback is reversed.
+// The buffer the editor hands to its preview node.
 function activeBuffer(reverse) {
-  const stretched = timeScale() !== 1;
-  if (!stretched) {
-    if (!reverse) return state.buffer;
-    if (!state.bufRev) state.bufRev = reverseBuffer(state.buffer);
-    return state.bufRev;
-  }
-  if (!reverse) return state.bufPitch;
-  if (!state.bufPitchRev) state.bufPitchRev = reverseBuffer(state.bufPitch);
-  return state.bufPitchRev;
+  const b = bank();
+  if (!b) return null;
+  const buf = stretchedFor(b, timeScale());
+  return reverse ? reversedOf(b, buf) : buf;
 }
 
 // opts: { reverse, follow }. follow means this region is the live selection and
@@ -530,11 +593,12 @@ function drawRuler(ctx, w) {
 }
 
 function drawSlices(ctx, w, h) {
-  const slices = state.project ? state.project.slices : [];
+  const all = state.project ? state.project.slices : [];
   ctx.font = '600 10px Fredoka, sans-serif';
   ctx.textBaseline = 'top';
 
-  slices.forEach((s, i) => {
+  all.forEach((s, i) => {
+    if (s.source_id !== state.activeSourceId) return;
     const x0 = timeToX(s.start_sec, w);
     const x1 = timeToX(s.end_sec, w);
     if (x1 < 0 || x0 > w) return;
@@ -638,6 +702,7 @@ function drawOverview() {
 
   const slices = state.project ? state.project.slices : [];
   slices.forEach((s, i) => {
+    if (s.source_id !== state.activeSourceId) return;
     const col = s.color || PALETTE[i % PALETTE.length];
     ctx.fillStyle = hexA(col, 0.4);
     ctx.fillRect((s.start_sec / dur) * w, 0, Math.max(1, ((s.end_sec - s.start_sec) / dur) * w), h);
@@ -755,7 +820,8 @@ waveCv.addEventListener('dblclick', (e) => {
   if (!state.project) return;
   const r = waveCv.getBoundingClientRect();
   const t = xToTime(e.clientX - r.left, r.width);
-  const i = state.project.slices.findIndex((s) => t >= s.start_sec && t <= s.end_sec);
+  const i = state.project.slices.findIndex(
+    (s) => s.source_id === state.activeSourceId && t >= s.start_sec && t <= s.end_sec);
   if (i >= 0) selectSlice(i, true);
 });
 
@@ -840,13 +906,15 @@ function addSlice(start, end, name) {
   const slices = state.project.slices;
   slices.push({
     idx: slices.length,
+    source_id: state.activeSourceId,
     name: name || `Chop ${slices.length + 1}`,
     start_sec: start,
     end_sec: end,
     color: PALETTE[slices.length % PALETTE.length],
     reverse: state.reverse,
   });
-  slices.sort((a, b) => a.start_sec - b.start_sec);
+  // Keep chops grouped by source, then in time order, so the pad numbers are stable.
+  slices.sort((a, b) => (a.source_id - b.source_id) || (a.start_sec - b.start_sec));
   renderSlices();
   markDirty();
   draw();
@@ -855,6 +923,7 @@ function addSlice(start, end, name) {
 function selectSlice(i, alsoSelect) {
   state.activeSlice = i;
   const s = state.project.slices[i];
+  if (s && s.source_id !== state.activeSourceId) alsoSelect = false;
   if (s && alsoSelect) {
     state.selection = { start: s.start_sec, end: s.end_sec };
     syncSelection();
@@ -867,9 +936,18 @@ function playSlice(i, loop) {
   const s = state.project && state.project.slices[i];
   if (!s) return;
   state.activeSlice = i;
-  // A slice carries its own reverse flag. That is what gets exported, so it is
-  // also what you should hear when you trigger it.
-  playRegion(s.start_sec, s.end_sec, loop, { reverse: !!s.reverse });
+
+  if (loop) {
+    // Holding shift loops a chop for auditioning, which is a solo activity, so it
+    // takes over the mono preview node.
+    if (s.source_id !== state.activeSourceId) switchSource(s.source_id);
+    playRegion(s.start_sec, s.end_sec, true, { reverse: !!s.reverse });
+  } else {
+    // A plain trigger is a voice. It layers over whatever else is ringing, which is
+    // the whole point of a pad bank.
+    playVoice(i, 0);
+    if (state.recording) recordHit(i);
+  }
   renderSlices();
 }
 
@@ -885,9 +963,16 @@ function renderSlices() {
     if (i === state.activeSlice) tr.className = 'active';
     const col = s.color || PALETTE[i % PALETTE.length];
 
+    const ps = psFor(s.source_id);
+    const srcName = ps && ps.source ? ps.source.title : '?';
+    const foreign = s.source_id !== state.activeSourceId;
+
     tr.innerHTML = `
       <td class="c-idx"><span class="swatch" style="background:${col}"></span>${i + 1}</td>
-      <td><input data-f="name" value="${escapeAttr(s.name)}"></td>
+      <td>
+        <input data-f="name" value="${escapeAttr(s.name)}">
+        ${foreign ? `<small class="from">from ${escapeAttr(srcName)}</small>` : ''}
+      </td>
       <td class="c-t"><input data-f="start" class="mono" value="${s.start_sec.toFixed(3)}"></td>
       <td class="c-t"><input data-f="end" class="mono" value="${s.end_sec.toFixed(3)}"></td>
       <td class="c-t mono">${(s.end_sec - s.start_sec).toFixed(3)}</td>
@@ -903,6 +988,7 @@ function renderSlices() {
 
     tr.addEventListener('click', (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
+      if (s.source_id !== state.activeSourceId) { stashBank(); switchSource(s.source_id); }
       selectSlice(i, true);
     });
 
@@ -933,8 +1019,15 @@ function renderSlices() {
     tr.querySelector('[data-a=del]').addEventListener('click', () => {
       slices.splice(i, 1);
       state.activeSlice = -1;
+      // Events index into the slice list, so shift them and drop the dead ones.
+      if (state.project.events) {
+        state.project.events = state.project.events
+          .filter((e) => e.slice_idx !== i)
+          .map((e) => (e.slice_idx > i ? { ...e, slice_idx: e.slice_idx - 1 } : e));
+      }
       markDirty();
       renderSlices();
+      renderPerf();
       draw();
     });
 
@@ -942,6 +1035,7 @@ function renderSlices() {
   });
 
   renderPads();
+  if (state.project && typeof drawLane === 'function') drawLane();
 }
 
 function escapeAttr(s) {
@@ -960,7 +1054,14 @@ function renderPads() {
     b.className = 'pad' + (s ? '' : ' empty');
     b.dataset.i = String(i);
     const key = i < 9 ? String(i + 1) : (i === 9 ? '0' : '');
-    b.innerHTML = `<span class="pad-name">${s ? escapeAttr(s.name) : ''}</span><span class="pad-key">${key}</span>`;
+    const ps = s ? psFor(s.source_id) : null;
+    const src = ps && ps.source ? ps.source.title : '';
+    b.innerHTML = `
+      <span class="pad-name">${s ? escapeAttr(s.name) : ''}${s && s.reverse ? ' ◀' : ''}</span>
+      <span class="pad-foot">
+        <span class="pad-src">${escapeAttr(src)}</span>
+        <span class="pad-key">${key}</span>
+      </span>`;
     if (s) {
       b.style.background = s.color || PALETTE[i % PALETTE.length];
       b.style.color = '#fff';
@@ -1103,7 +1204,9 @@ function applyRate() {
 }
 
 $('#pitch').addEventListener('input', (e) => {
-  state.pitch = parseFloat(e.target.value);
+  const ps = activePS();
+  if (!ps) return;
+  ps.pitch = parseFloat(e.target.value);
   paintPitchLabel();
 });
 // The stretch is expensive, so only run it when the slider is let go.
@@ -1115,30 +1218,26 @@ $('#pitch-linked').addEventListener('change', (e) => {
 });
 
 function paintPitchLabel() {
-  const v = state.pitch;
+  const ps = activePS();
+  const v = ps ? Number(ps.pitch) || 0 : 0;
   $('#pitch-val').textContent = `${v > 0 ? '+' : ''}${v.toFixed(1)} st`;
 }
 
 async function applyPitch() {
-  if (!state.project) return;
+  const ps = activePS();
+  if (!ps) return;
   paintPitchLabel();
-  state.project.pitch = state.pitch;
   state.project.pitch_linked = state.pitchLinked;
-  state.bufPitchRev = null;
 
-  if (!state.pitch || state.pitchLinked) {
-    // Nothing to render. Tied pitch is just playbackRate, same as a hardware sampler.
-    state.bufPitch = null;
-    state.pitchCacheFor = null;
-  } else if (state.pitchCacheFor !== state.pitch) {
+  const k = timeScale();
+  if (Math.abs(k - 1) > 1e-4) {
     busy(true, 'Pitching…', 'Time stretching the audio so the pitch moves without dragging the tempo with it.');
     await new Promise((r) => setTimeout(r, 20));
     try {
-      state.bufPitch = timeStretch(state.buffer, pitchRatio());
-      state.pitchCacheFor = state.pitch;
+      stretchedFor(bank(), k);
     } catch (err) {
       toast(err.message);
-      state.pitch = 0;
+      ps.pitch = 0;
       $('#pitch').value = '0';
       paintPitchLabel();
     } finally {
@@ -1148,8 +1247,8 @@ async function applyPitch() {
 
   applyRate();
   markDirty();
+  renderSourceTabs();
 
-  // The buffer under the node just changed, so it has to be restarted.
   const r = state.playRegion;
   if (state.playing && r) {
     playRegion(r.start, r.end, r.loop, { reverse: r.reverse, follow: r.follow });
@@ -1173,13 +1272,21 @@ $('#btn-match').addEventListener('click', () => {
 /* ==== grid wiring ==== */
 
 $('#bpm').addEventListener('change', (e) => {
-  if (!state.project) return;
-  state.project.bpm = Math.max(0, parseFloat(e.target.value) || 0);
+  const ps = activePS();
+  if (!ps) return;
+  ps.bpm = Math.max(0, parseFloat(e.target.value) || 0);
+  // First source to get a tempo also sets the project tempo, since a pad bank with
+  // no tempo cannot warp anything.
+  if (!projectBpm() && ps.bpm) {
+    state.project.bpm = ps.bpm;
+    $('#proj-bpm').value = ps.bpm.toFixed(2);
+  }
   markDirty(); renderSlices(); draw();
 });
 $('#offset').addEventListener('change', (e) => {
-  if (!state.project) return;
-  state.project.grid_offset = Math.max(0, parseFloat(e.target.value) || 0);
+  const ps = activePS();
+  if (!ps) return;
+  ps.grid_offset = Math.max(0, parseFloat(e.target.value) || 0);
   markDirty(); draw();
 });
 $('#bpb').addEventListener('change', (e) => {
@@ -1187,14 +1294,28 @@ $('#bpb').addEventListener('change', (e) => {
   state.project.beats_per_bar = Math.max(1, parseInt(e.target.value, 10) || 4);
   markDirty(); renderSlices(); draw();
 });
+$('#proj-bpm').addEventListener('change', (e) => {
+  if (!state.project) return;
+  state.project.bpm = Math.max(0, parseFloat(e.target.value) || 0);
+  markDirty();
+  renderSourceTabs();
+});
+$('#sync').addEventListener('change', (e) => {
+  const ps = activePS();
+  if (!ps) return;
+  ps.sync = e.target.checked;
+  markDirty();
+  renderSourceTabs();
+});
 $('#snap').addEventListener('change', (e) => { state.snapRaw = e.target.value; });
 
 $('#btn-half').addEventListener('click', () => setBpm(bpm() / 2));
 $('#btn-double').addEventListener('click', () => setBpm(bpm() * 2));
 $('#btn-offset-here').addEventListener('click', () => {
-  if (!state.project) return;
+  const ps = activePS();
+  if (!ps) return;
   const t = state.selection ? state.selection.start : state.cursor;
-  state.project.grid_offset = Math.max(0, t);
+  ps.grid_offset = Math.max(0, t);
   $('#offset').value = t.toFixed(3);
   markDirty();
   draw();
@@ -1202,10 +1323,15 @@ $('#btn-offset-here').addEventListener('click', () => {
 });
 
 function setBpm(v) {
-  if (!state.project || !isFinite(v) || v <= 0) return;
-  state.project.bpm = v;
+  const ps = activePS();
+  if (!ps || !isFinite(v) || v <= 0) return;
+  ps.bpm = v;
   $('#bpm').value = v.toFixed(2);
-  markDirty(); renderSlices(); draw();
+  if (!projectBpm()) {
+    state.project.bpm = v;
+    $('#proj-bpm').value = v.toFixed(2);
+  }
+  markDirty(); renderSlices(); draw(); renderSourceTabs();
 }
 
 let taps = [];
@@ -1229,15 +1355,20 @@ $('#btn-detect').addEventListener('click', () => {
   setTimeout(() => {
     try {
       computeOnsets();
+      const ps = activePS();
       const res = detectTempo();
-      if (res) {
-        state.project.bpm = res.bpm;
-        state.project.grid_offset = res.offset;
+      if (res && ps) {
+        ps.bpm = res.bpm;
+        ps.grid_offset = res.offset;
         $('#bpm').value = res.bpm.toFixed(2);
         $('#offset').value = res.offset.toFixed(3);
+        if (!projectBpm()) {
+          state.project.bpm = res.bpm;
+          $('#proj-bpm').value = res.bpm.toFixed(2);
+        }
       }
       const key = detectKey();
-      state.project.detected_key = key || '';
+      if (ps) ps.detected_key = key || '';
       $('#analysis').textContent = [
         res ? `tempo    ${res.bpm.toFixed(2)} BPM  (confidence ${(res.confidence * 100).toFixed(0)}%)` : 'tempo    not found',
         res ? `downbeat ${res.offset.toFixed(3)} s` : '',
@@ -1248,6 +1379,7 @@ $('#btn-detect').addEventListener('click', () => {
       ].filter(Boolean).join('\n');
       markDirty();
       renderSlices();
+      renderSourceTabs();
       draw();
     } catch (err) {
       $('#analysis').textContent = `Analysis failed: ${err.message}`;
@@ -1264,14 +1396,22 @@ $('#btn-even').addEventListener('click', evenChop);
 $('#btn-grid-chop').addEventListener('click', gridChop);
 $('#btn-transient').addEventListener('click', transientChop);
 $('#btn-clear-slices').addEventListener('click', () => {
-  if (!state.project || !state.project.slices.length) return;
-  if (!confirm('Delete every slice in this project?')) return;
-  state.project.slices = [];
+  if (!state.project || !activeSlices().length) return;
+  if (!confirm(`Delete every chop cut from "${state.source.title}"? Other sources keep theirs.`)) return;
+  state.project.slices = state.project.slices.filter((s) => s.source_id !== state.activeSourceId);
   state.activeSlice = -1;
+  dropOrphanEvents();
   markDirty();
   renderSlices();
   draw();
 });
+
+// Pad events point at a slice index, so anything that removes a slice has to fix them.
+function dropOrphanEvents() {
+  if (!state.project || !state.project.events) return;
+  const n = state.project.slices.length;
+  state.project.events = state.project.events.filter((e) => e.slice_idx >= 0 && e.slice_idx < n);
+}
 
 /* ==== keyboard ==== */
 
@@ -1328,75 +1468,204 @@ window.addEventListener('keydown', (e) => {
 
 /* ==== loading ==== */
 
-async function loadSourceIntoEditor(src, project) {
-  busy(true, 'Loading audio…', src.title);
+// Fetch and decode one source, and cache everything derived from it.
+async function ensureBank(sourceID) {
+  if (state.banks.has(sourceID)) return state.banks.get(sourceID);
+
+  const res = await fetch(`/api/sources/${sourceID}/audio`, { credentials: 'same-origin' });
+  if (!res.ok) throw new Error('Could not fetch the audio for that source.');
+  const bytes = await res.arrayBuffer();
+
+  ensureCtx();
+  const buffer = await actx.decodeAudioData(bytes);
+  const b = { buffer, peaks: buildPeaks(buffer), env: null, onsets: null, stretch: new Map(), rev: new WeakMap() };
+  state.banks.set(sourceID, b);
+  return b;
+}
+
+// Point the editor at one of the project's sources.
+function switchSource(sourceID) {
+  const ps = psFor(sourceID);
+  const b = state.banks.get(sourceID);
+  if (!ps || !b) return;
+
+  stopAudio();
+  state.activeSourceId = sourceID;
+  state.source = ps.source;
+  state.buffer = b.buffer;
+  state.peaks = b.peaks;
+  state.env = b.env;
+  state.onsets = b.onsets;
+  state.cursor = 0;
+  state.selection = null;
+  state.activeSlice = -1;
+  state.view = { start: 0, end: b.buffer.duration };
+
+  $('#bpm').value = (Number(ps.bpm) || 0).toFixed(2);
+  $('#offset').value = (Number(ps.grid_offset) || 0).toFixed(3);
+  $('#pitch').value = String(Number(ps.pitch) || 0);
+  $('#sync').checked = !!ps.sync;
+  paintPitchLabel();
+  $('#analysis').textContent = ps.detected_key
+    ? `key      ${ps.detected_key}`
+    : 'Run detect to fill this in.';
+
+  syncSelection();
+  syncTransport();
+  applyRate();
+  renderSourceTabs();
+  renderSlices();
+  draw();
+}
+
+// The editor caches its analysis on state, so hand it back to the bank on the way out.
+function stashBank() {
+  const b = bank();
+  if (!b) return;
+  b.env = state.env || b.env;
+  b.onsets = state.onsets || b.onsets;
+}
+
+async function openProject(project) {
+  busy(true, 'Loading project…', project.name);
   try {
-    const res = await fetch(`/api/sources/${src.id}/audio`, { credentials: 'same-origin' });
-    if (!res.ok) throw new Error('Could not fetch the audio for that source.');
-    const bytes = await res.arrayBuffer();
-
     ensureCtx();
-    const buf = await actx.decodeAudioData(bytes);
-
-    stopAudio();
-    state.source = src;
-    state.buffer = buf;
-    state.peaks = buildPeaks(buf);
-    state.onsets = null;
-    state.env = null;
-    state.bufRev = null;
-    state.bufPitch = null;
-    state.bufPitchRev = null;
-    state.pitchCacheFor = null;
-    state.cursor = 0;
-    state.selection = null;
-    state.activeSlice = -1;
-    state.view = { start: 0, end: buf.duration };
-
-    if (!project) {
-      project = await api('/api/projects', {
-        method: 'POST',
-        body: JSON.stringify({ source_id: src.id, name: src.title }),
-      });
-    }
     state.project = project;
     state.project.slices = project.slices || [];
+    state.project.sources = project.sources || [];
+    state.project.events = project.events || [];
+
+    if (!state.project.sources.length) throw new Error('That project has no sources.');
+
+    state.banks.clear();
+    for (const ps of state.project.sources) {
+      busy(true, 'Loading audio…', ps.source ? ps.source.title : '');
+      await ensureBank(ps.source_id);
+    }
+
+    state.pitchLinked = !!project.pitch_linked;
+    state.reverse = false;
+    $('#pitch-linked').checked = state.pitchLinked;
+    $('#project-name').value = project.name;
+    $('#bpb').value = String(project.beats_per_bar || 4);
+    $('#proj-bpm').value = (Number(project.bpm) || 0).toFixed(2);
+    $('#bars').value = String(project.bars || 4);
+
     state.dirty = false;
+    $('#save-state').textContent = 'saved';
+    $('#save-state').classList.remove('dirty');
 
     $('#empty').hidden = true;
     $('#bench').hidden = false;
-    $('#project-name').value = project.name;
-    $('#bpm').value = (project.bpm || 0).toFixed(2);
-    $('#offset').value = (project.grid_offset || 0).toFixed(3);
-    $('#bpb').value = String(project.beats_per_bar || 4);
 
-    state.pitch = Number(project.pitch) || 0;
-    state.pitchLinked = !!project.pitch_linked;
-    state.reverse = false;
-    $('#pitch').value = String(state.pitch);
-    $('#pitch-linked').checked = state.pitchLinked;
-    paintPitchLabel();
-    if (state.pitch && !state.pitchLinked) {
-      state.bufPitch = timeStretch(buf, pitchRatio());
-      state.pitchCacheFor = state.pitch;
-    }
-
-    $('#save-state').textContent = 'saved';
-    $('#save-state').classList.remove('dirty');
-    $('#analysis').textContent = project.detected_key
-      ? `key      ${project.detected_key}`
-      : 'Run detect to fill this in.';
-
-    syncSelection();
-    syncTransport();
-    renderSlices();
-    draw();
+    switchSource(state.project.sources[0].source_id);
+    renderPerf();
     closeLibrary();
   } catch (err) {
     toast(err.message);
   } finally {
     busy(false);
   }
+}
+
+// Start a brand new pad bank from one source.
+async function newProjectFromSource(src) {
+  try {
+    const created = await api('/api/projects', {
+      method: 'POST',
+      body: JSON.stringify({ source_id: src.id, name: src.title }),
+    });
+    const full = await api(`/api/projects/${created.id}`);
+    await refreshLibrary();
+    await openProject(full);
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+// Drop another song into the pad bank you already have open.
+async function addSourceToProject(src) {
+  if (!state.project) { await newProjectFromSource(src); return; }
+  if (psFor(src.id)) { switchSource(src.id); closeLibrary(); return; }
+
+  busy(true, 'Adding to pad bank…', src.title);
+  try {
+    if (state.dirty) await saveProject(true);
+    const full = await api(`/api/projects/${state.project.id}/sources`, {
+      method: 'POST',
+      body: JSON.stringify({ source_id: src.id }),
+    });
+    state.project = full;
+    state.project.slices = full.slices || [];
+    state.project.sources = full.sources || [];
+    state.project.events = full.events || [];
+    await ensureBank(src.id);
+    switchSource(src.id);
+    renderPerf();
+    closeLibrary();
+    toast(`"${src.title}" added. Its chops share the same pads.`);
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    busy(false);
+  }
+}
+
+async function removeSourceFromProject(sourceID) {
+  if (!state.project || state.project.sources.length <= 1) {
+    toast('A pad bank needs at least one source.');
+    return;
+  }
+  const ps = psFor(sourceID);
+  if (!confirm(`Remove "${ps.source.title}" from this pad bank? Its chops go too.`)) return;
+
+  try {
+    if (state.dirty) await saveProject(true);
+    const full = await api(`/api/projects/${state.project.id}/sources/${sourceID}`, { method: 'DELETE' });
+    state.project = full;
+    state.project.slices = full.slices || [];
+    state.project.sources = full.sources || [];
+    state.project.events = full.events || [];
+    state.banks.delete(sourceID);
+    switchSource(state.project.sources[0].source_id);
+    renderPerf();
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+function renderSourceTabs() {
+  const wrap = $('#source-tabs');
+  if (!wrap || !state.project) return;
+  wrap.innerHTML = '';
+
+  state.project.sources.forEach((ps) => {
+    const active = ps.source_id === state.activeSourceId;
+    const warp = warpFor(ps);
+    const el = document.createElement('div');
+    el.className = 'stab' + (active ? ' on' : '');
+
+    const n = state.project.slices.filter((s) => s.source_id === ps.source_id).length;
+    const warpTxt = Math.abs(warp - 1) > 0.005 ? `${warp.toFixed(3)}×` : '1:1';
+    el.innerHTML = `
+      <button class="stab-open">
+        <b>${escapeAttr(ps.source.title)}</b>
+        <small>${ps.bpm ? ps.bpm.toFixed(1) + ' BPM' : 'no tempo'} · ${warpTxt} · ${n} chop${n === 1 ? '' : 's'}</small>
+      </button>
+      <button class="btn btn-sq btn-ghost" data-a="rm" title="Remove from pad bank">✕</button>`;
+    el.querySelector('.stab-open').addEventListener('click', () => {
+      stashBank();
+      switchSource(ps.source_id);
+    });
+    el.querySelector('[data-a=rm]').addEventListener('click', () => removeSourceFromProject(ps.source_id));
+    wrap.appendChild(el);
+  });
+
+  const add = document.createElement('button');
+  add.className = 'btn stab-add';
+  add.textContent = '+ add source';
+  add.addEventListener('click', async () => { await refreshLibrary(); openLibrary(); });
+  wrap.appendChild(add);
 }
 
 $('#btn-fetch').addEventListener('click', async () => {
@@ -1407,7 +1676,8 @@ $('#btn-fetch').addEventListener('click', async () => {
   try {
     const src = await api('/api/sources/link', { method: 'POST', body: JSON.stringify({ url }) });
     await refreshLibrary();
-    await loadSourceIntoEditor(src, null);
+    if (state.project) await addSourceToProject(src);
+    else await newProjectFromSource(src);
     $('#url-input').value = '';
   } catch (err) {
     $('#load-err').textContent = err.message;
@@ -1445,7 +1715,8 @@ async function uploadFile(file) {
     fd.append('file', file);
     const src = await api('/api/sources/upload', { method: 'POST', body: fd });
     await refreshLibrary();
-    await loadSourceIntoEditor(src, null);
+    if (state.project) await addSourceToProject(src);
+    else await newProjectFromSource(src);
   } catch (err) {
     $('#load-err').textContent = err.message;
   } finally {
@@ -1508,14 +1779,13 @@ function renderLibrary() {
       </button>
       <button class="btn btn-sq btn-ghost" data-a="del">✕</button>`;
     el.querySelector('.lib-open').addEventListener('click', async () => {
-      if (!src) { toast('That source is gone.'); return; }
       const full = await api(`/api/projects/${p.id}`);
-      await loadSourceIntoEditor(src, full);
+      await openProject(full);
     });
     el.querySelector('[data-a=del]').addEventListener('click', async () => {
       if (!confirm(`Delete project "${p.name}"? The audio stays in the library.`)) return;
       await api(`/api/projects/${p.id}`, { method: 'DELETE' });
-      if (state.project && state.project.id === p.id) { state.project = null; newSource(); }
+      if (state.project && state.project.id === p.id) newSource();
       await refreshLibrary();
     });
     ps.appendChild(el);
@@ -1547,7 +1817,7 @@ function sourceRow(s, isStem) {
     ${stemBtn}
     <button class="btn btn-sq btn-ghost" data-a="del">✕</button>`;
 
-  el.querySelector('.lib-open').addEventListener('click', () => loadSourceIntoEditor(s, null));
+  el.querySelector('.lib-open').addEventListener('click', () => addSourceToProject(s));
 
   const stems = el.querySelector('[data-a=stems]');
   if (stems) {
@@ -1585,10 +1855,13 @@ $('#btn-new').addEventListener('click', () => { newSource(); closeLibrary(); });
 
 function newSource() {
   stopAudio();
+  stopPerf();
   state.project = null;
   state.source = null;
   state.buffer = null;
   state.peaks = null;
+  state.banks.clear();
+  state.activeSourceId = 0;
   state.dirty = false;
   $('#bench').hidden = true;
   $('#empty').hidden = false;
@@ -1641,6 +1914,10 @@ async function boot() {
   }
 }
 
-window.addEventListener('resize', () => { if (state.buffer) draw(); });
+window.addEventListener('resize', () => {
+  if (state.buffer) draw();
+  if (state.project) drawLane();
+});
 
-boot();
+// perf.js is loaded after this file, and boot reaches into it, so wait for the parse.
+window.addEventListener('DOMContentLoaded', boot);

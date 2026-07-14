@@ -627,17 +627,22 @@ function download(blob, name) {
 async function renderSliceBuffer(s) {
   const bake = $('#bake').checked;
   const rev = !!s.reverse;
+  const b = state.banks.get(s.source_id);
+  if (!b) throw new Error('That chop points at a source that is not loaded.');
 
   if (!bake) {
-    const src = activeBufferPlain(rev);
-    const span = regionInBuffer(s.start_sec, s.end_sec, rev, src);
+    // Raw: exactly what you cut, forward or backwards. No tempo warp, no pitch.
+    const src = rev ? reversedOf(b, b.buffer) : b.buffer;
+    const span = regionIn(s.start_sec, s.end_sec, rev, src, 1);
     return sliceChannels(src, span.a, span.b);
   }
 
-  const buf = activeBuffer(rev);
-  const span = regionInBuffer(s.start_sec, s.end_sec, rev, buf);
-  const rate = nodeRate();
-  const sr = buf.sampleRate;
+  // Baked: the chop as the pads actually play it, warped to project tempo and pitched.
+  const plan = voicePlan(state.project.slices.indexOf(s));
+  if (!plan) throw new Error('Could not render that chop.');
+  const buf = plan.buf;
+  const span = plan.span;
+  const rate = plan.rate;
   const frames = Math.max(1, Math.round(((span.b - span.a) / rate) * sr));
 
   const oc = new OfflineAudioContext(buf.numberOfChannels, frames, sr);
@@ -653,11 +658,11 @@ async function renderSliceBuffer(s) {
   return { chans, sampleRate: sr, len: done.length };
 }
 
-// The unpitched buffer, forward or reversed. Used when not baking.
+// The unstretched buffer for the active source, forward or reversed. Used when not baking.
 function activeBufferPlain(reverse) {
-  if (!reverse) return state.buffer;
-  if (!state.bufRev) state.bufRev = reverseBuffer(state.buffer);
-  return state.bufRev;
+  const b = bank();
+  if (!b) return state.buffer;
+  return reverse ? reversedOf(b, b.buffer) : b.buffer;
 }
 
 function requireSlices() {
@@ -672,10 +677,17 @@ function timestampText() {
   const s = state.project.slices;
   const lines = [
     `${state.project.name}`,
-    `source: ${state.source.title}`,
-    `tempo:  ${bpm() ? bpm().toFixed(2) + ' BPM' : 'not set'}${state.project.detected_key ? '   key: ' + state.project.detected_key : ''}`,
+    `project tempo: ${projectBpm() ? projectBpm().toFixed(2) + ' BPM' : 'not set'}`,
     '',
+    'sources:',
   ];
+  for (const ps of state.project.sources) {
+    lines.push(`  ${ps.source.title}` +
+      `  ${ps.bpm ? ps.bpm.toFixed(2) + ' BPM' : 'no tempo'}` +
+      `${ps.detected_key ? '  ' + ps.detected_key : ''}` +
+      `${ps.sync ? '  warped' : ''}`);
+  }
+  lines.push('');
   s.forEach((sl, i) => {
     const len = sl.end_sec - sl.start_sec;
     lines.push(
@@ -705,23 +717,28 @@ $('#btn-export-json').addEventListener('click', () => {
   if (!requireSlices()) return;
   const payload = {
     project: state.project.name,
-    source: state.source.title,
-    source_url: state.source.source_url || null,
-    duration: state.buffer.duration,
-    sample_rate: state.buffer.sampleRate,
-    bpm: bpm() || null,
-    grid_offset: offset(),
+    project_bpm: projectBpm() || null,
     beats_per_bar: bpb(),
-    key: state.project.detected_key || null,
+    bars: state.project.bars || 4,
+    sources: state.project.sources.map((ps) => ({
+      id: ps.source_id,
+      title: ps.source.title,
+      url: ps.source.source_url || null,
+      bpm: ps.bpm || null,
+      grid_offset: ps.grid_offset,
+      key: ps.detected_key || null,
+      pitch: ps.pitch,
+      sync: ps.sync,
+    })),
+    events: state.project.events.map((e) => ({ pad: e.slice_idx + 1, at: Number(e.at_sec.toFixed(4)) })),
     slices: state.project.slices.map((s, i) => ({
       index: i + 1,
+      source_id: s.source_id,
       name: s.name,
       start: Number(s.start_sec.toFixed(4)),
       end: Number(s.end_sec.toFixed(4)),
       length: Number((s.end_sec - s.start_sec).toFixed(4)),
       reverse: !!s.reverse,
-      start_sample: Math.round(s.start_sec * state.buffer.sampleRate),
-      end_sample: Math.round(s.end_sec * state.buffer.sampleRate),
     })),
   };
   download(
@@ -740,8 +757,11 @@ $('#btn-export-labels').addEventListener('click', () => {
 });
 
 $('#btn-export-cue').addEventListener('click', () => {
-  const slices = requireSlices();
-  if (!slices) return;
+  const all = requireSlices();
+  if (!all) return;
+  // A wav can only carry markers for its own audio, so this is the active source only.
+  const slices = all.filter((s) => s.source_id === state.activeSourceId);
+  if (!slices.length) { toast('No chops on this source yet.'); return; }
   busy(true, 'Writing wav…', 'Full track with your slices embedded as cue markers and regions.');
   setTimeout(() => {
     try {
