@@ -31,6 +31,11 @@
 
 * { box-sizing: border-box; }
 
+/* Several elements below get an explicit display (grid, flex) and are toggled with
+   the hidden attribute. The UA rule [hidden]{display:none} is only class-specificity,
+   so a later class rule beats it and hidden silently stops working. Force it. */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   min-height: 100%;
