@@ -1,39 +1,49 @@
 services:
   db:
-    image: postgres:16-alpine
+    image: postgres:${POSTGRES_VERSION:-16-alpine}
     restart: unless-stopped
     environment:
-      POSTGRES_USER: chopper
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
-      POSTGRES_DB: chopper
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
     volumes:
       - db:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U chopper"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
       retries: 10
+    # The database is only reachable from the app container. Nothing is published
+    # to the host. Uncomment if you need a psql client from outside.
+    # ports:
+    #   - "${DB_BIND:-127.0.0.1}:${DB_PORT:?set DB_PORT in .env}:5432"
 
   app:
     build:
       context: .
       args:
-        WITH_DEMUCS: ${WITH_DEMUCS:-0}
+        WITH_DEMUCS: ${WITH_DEMUCS:-1}
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://chopper:${POSTGRES_PASSWORD}@db:5432/chopper?sslmode=disable
+      ADDR: ":${APP_INTERNAL_PORT:?set APP_INTERNAL_PORT in .env}"
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
       AUTH_PASSWORD: ${AUTH_PASSWORD:?set AUTH_PASSWORD in .env}
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      DATA_DIR: ${DATA_DIR:-/data}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-300}
       SECURE_COOKIE: ${SECURE_COOKIE:-true}
-      DEMUCS_BIN: ${DEMUCS_BIN:-}
+      YTDLP_BIN: ${YTDLP_BIN:-yt-dlp}
+      FFMPEG_BIN: ${FFMPEG_BIN:-ffmpeg}
+      FFPROBE_BIN: ${FFPROBE_BIN:-ffprobe}
+      DEMUCS_BIN: ${DEMUCS_BIN:-demucs}
+      DEMUCS_MODEL: ${DEMUCS_MODEL:-htdemucs}
     volumes:
-      - audio:/data
+      - audio:${DATA_DIR:-/data}
     ports:
-      - "127.0.0.1:8080:8080"
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:?set APP_PORT in .env}:${APP_INTERNAL_PORT}"
 
 volumes:
   db:

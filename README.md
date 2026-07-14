@@ -25,12 +25,19 @@ Go + Postgres on the back, Web Audio + canvas on the front. One binary, frontend
 
 ### Docker
 
-    cp .env.example .env
-    # fill in AUTH_PASSWORD, SESSION_SECRET, POSTGRES_PASSWORD
+    ./scripts/gen-env.sh
     docker compose up -d --build
 
-Add `WITH_DEMUCS=1` and `DEMUCS_BIN=demucs` to `.env` before building if you want stems.
-The image grows by about two gigabytes because it drags torch in.
+`gen-env.sh` writes a `.env` with random free ports, a random database name, user and
+password, a random session secret, and a random sign in password. It prints the port and
+the password at the end. Run it once per deployment and do not commit the result.
+
+Nothing in `docker-compose.yml` is hardcoded, so if you want to change a port or a
+credential, change `.env` and `docker compose up -d` again.
+
+Stem separation is on by default. That is what the two extra gigabytes in the image are:
+demucs drags torch in with it. Set `WITH_DEMUCS=0` and `DEMUCS_BIN=` in `.env` before
+building if you would rather have a small image and no stem splitting.
 
 ### Bare metal
 
@@ -45,8 +52,15 @@ Needs `ffmpeg`, `ffprobe` and `yt-dlp` on PATH, plus a Postgres database.
 Migrations run on boot. There is nothing to apply by hand.
 
 `deploy/chopper.service` and `deploy/nginx.conf` are there for the systemd + nginx route.
-The nginx timeouts in that file are not decoration: a yt-dlp fetch of a long track will
-sit silent for minutes, and the default 60 second `proxy_read_timeout` kills it.
+Two things about that nginx config:
+
+- Replace `APP_PORT` in the `proxy_pass` line with whatever `gen-env.sh` put in your `.env`.
+  It is random per deployment, so there is nothing sensible to default it to.
+- The timeouts in there are not decoration. A yt-dlp fetch of a long track sits silent for
+  minutes, and the default 60 second `proxy_read_timeout` kills it mid download.
+
+Keep `APP_BIND=127.0.0.1`. Otherwise the Go server binds every interface and anyone who
+can reach the box on that port walks straight past nginx and your SSL.
 
 ## Auth
 

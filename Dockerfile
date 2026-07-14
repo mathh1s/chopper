@@ -7,9 +7,10 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/chopper ./cmd/serv
 
 FROM python:3.11-slim-bookworm
 
-# Set to 1 at build time to bake demucs in. It pulls torch, so the image grows
-# by roughly two gigabytes. Leave it off unless you actually want stem splitting.
-ARG WITH_DEMUCS=0
+# Bakes demucs in, which is what gives you stem separation. It pulls torch, so
+# the image grows by roughly two gigabytes. Set to 0 at build time if you want
+# a small image and no stem splitting.
+ARG WITH_DEMUCS=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg ca-certificates \
