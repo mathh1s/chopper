@@ -34,6 +34,14 @@ const state = {
   rate: 1,
   gain: 0.9,
 
+  reverse: false,    // transport reverse, applies to what you audition
+  pitch: 0,          // semitones
+  pitchLinked: false,// true means pitch just drives speed, like an old sampler
+  bufRev: null,      // reversed copy of the source
+  bufPitch: null,    // time stretched copy for the current pitch
+  bufPitchRev: null,
+  pitchCacheFor: null,
+
   playing: false,
   playRegion: null,  // { start, end, loop }
   playAnchorCtx: 0,
@@ -165,55 +173,170 @@ function stopAudio() {
   syncTransport();
 }
 
-function playRegion(start, end, loop) {
-  const buf = state.buffer;
-  if (!buf) return;
+/* Pitch shifting works by time stretching the buffer by ratio k and then playing
+   it back k times faster. The speed cancels out and the pitch does not. That means
+   every position in the stretched buffer is k times its position in the original,
+   so all the ui stays in original time and we only scale on the way into the node.
+
+   When pitch is tied to speed there is no stretch at all, the ratio just folds into
+   playbackRate, which is exactly what a sampler does when you play a key higher. */
+
+function pitchRatio() {
+  if (!state.pitch) return 1;
+  return Math.pow(2, state.pitch / 12);
+}
+
+// How much longer the buffer we are actually playing is than the original.
+function timeScale() {
+  return (state.pitch && !state.pitchLinked) ? pitchRatio() : 1;
+}
+
+// playbackRate the node needs to run at.
+//
+// It is rate * ratio in both modes, which looks like a coincidence and is not.
+// Tied: there is no stretch, so the ratio moves speed and pitch together, which is
+// the point. Free: the buffer was already stretched by ratio, so playing it back
+// ratio times faster cancels the length change and leaves only the pitch change.
+function nodeRate() {
+  return state.rate * pitchRatio();
+}
+
+function reverseBuffer(buf) {
+  const out = actx.createBuffer(buf.numberOfChannels, buf.length, buf.sampleRate);
+  for (let c = 0; c < buf.numberOfChannels; c++) {
+    const src = buf.getChannelData(c);
+    const dst = out.getChannelData(c);
+    for (let i = 0, j = buf.length - 1; i < buf.length; i++, j--) dst[i] = src[j];
+  }
+  return out;
+}
+
+// The buffer we hand to the node, given whether this playback is reversed.
+function activeBuffer(reverse) {
+  const stretched = timeScale() !== 1;
+  if (!stretched) {
+    if (!reverse) return state.buffer;
+    if (!state.bufRev) state.bufRev = reverseBuffer(state.buffer);
+    return state.bufRev;
+  }
+  if (!reverse) return state.bufPitch;
+  if (!state.bufPitchRev) state.bufPitchRev = reverseBuffer(state.bufPitch);
+  return state.bufPitchRev;
+}
+
+// opts: { reverse, follow }. follow means this region is the live selection and
+// should track it while it plays, rather than needing a stop and start.
+function playRegion(start, end, loop, opts) {
+  opts = opts || {};
+  const reverse = !!opts.reverse;
+  const dur = state.buffer ? state.buffer.duration : 0;
+  if (!dur) return;
   ensureCtx();
+
+  const buf = activeBuffer(reverse);
+  if (!buf) return;
   stopAudio();
 
-  start = Math.max(0, Math.min(start, buf.duration));
-  if (end == null || end <= start + 0.0005) end = buf.duration;
-  end = Math.min(end, buf.duration);
+  start = Math.max(0, Math.min(start, dur));
+  if (end == null || end <= start + 0.0005) end = dur;
+  end = Math.min(end, dur);
+
+  const span = regionInBuffer(start, end, reverse, buf);
 
   node = actx.createBufferSource();
   node.buffer = buf;
-  node.playbackRate.value = state.rate;
+  node.playbackRate.value = nodeRate();
   node.connect(master);
 
   if (loop) {
     node.loop = true;
-    node.loopStart = start;
-    node.loopEnd = end;
-    node.start(0, start);
+    node.loopStart = span.a;
+    node.loopEnd = span.b;
+    node.start(0, span.a);
   } else {
     node.onended = () => {
       if (!state.playing) return;
       state.playing = false;
-      state.cursor = end;
+      state.cursor = reverse ? start : end;
       state.playRegion = null;
       syncTransport();
       draw();
     };
-    node.start(0, start, (end - start) / 1); // duration is in buffer time, rate is applied on top
+    node.start(0, span.a, span.b - span.a);
   }
 
-  state.playRegion = { start, end, loop: !!loop };
+  state.playRegion = {
+    start, end, loop: !!loop, reverse, follow: !!opts.follow, a: span.a, b: span.b,
+  };
   state.playAnchorCtx = actx.currentTime;
-  state.playAnchorBuf = start;
+  state.playAnchorBuf = span.a;
   state.playing = true;
   syncTransport();
   tick();
 }
 
+// Map an original-time region onto positions inside the buffer we are actually
+// playing, which may be stretched, reversed, or both.
+function regionInBuffer(start, end, reverse, buf) {
+  const k = timeScale();
+  let a = start * k;
+  let b = end * k;
+  if (reverse) {
+    const D = buf.duration;
+    const na = D - b;
+    const nb = D - a;
+    a = na;
+    b = nb;
+  }
+  return { a: Math.max(0, a), b: Math.min(buf.duration, b) };
+}
+
+// The fix for the loop not following the selection: retarget the running node
+// instead of making the user stop and start. loopStart and loopEnd are live.
+function refreshLoopRegion() {
+  const r = state.playRegion;
+  if (!state.playing || !node || !r || !r.follow) return;
+  const sel = state.selection;
+  if (!sel || sel.end - sel.start < 0.005) return;
+
+  const head = playheadTime();
+  const buf = activeBuffer(r.reverse);
+  const span = regionInBuffer(sel.start, sel.end, r.reverse, buf);
+
+  // If the playhead is no longer inside the new region there is nothing sensible
+  // to retarget to, so jump to the top of it.
+  if (head < sel.start || head > sel.end) {
+    playRegion(sel.start, sel.end, state.loop, { reverse: r.reverse, follow: true });
+    return;
+  }
+
+  r.start = sel.start;
+  r.end = sel.end;
+  r.a = span.a;
+  r.b = span.b;
+  if (node.loop) {
+    node.loopStart = span.a;
+    node.loopEnd = span.b;
+  }
+}
+
 function playheadTime() {
   if (!state.playing || !state.playRegion || !actx) return state.cursor;
   const r = state.playRegion;
-  let t = state.playAnchorBuf + (actx.currentTime - state.playAnchorCtx) * state.rate;
+  const buf = activeBuffer(r.reverse);
+  if (!buf) return state.cursor;
+
+  let t = state.playAnchorBuf + (actx.currentTime - state.playAnchorCtx) * nodeRate();
   if (r.loop) {
-    const len = r.end - r.start;
-    if (len > 0 && t > r.end) t = r.start + ((t - r.start) % len);
+    const len = r.b - r.a;
+    if (len > 0 && t > r.b) t = r.a + ((t - r.a) % len);
   }
-  return Math.min(t, state.buffer ? state.buffer.duration : 0);
+  t = Math.max(0, Math.min(t, buf.duration));
+
+  // Back to original forward time, which is what the whole ui speaks.
+  const k = timeScale();
+  const orig = r.reverse ? (buf.duration - t) / k : t / k;
+  return Math.max(0, Math.min(orig, state.buffer.duration));
 }
 
 let rafId = 0;
@@ -232,9 +355,9 @@ function togglePlay() {
   if (state.playing) { stopAudio(); return; }
   const sel = state.selection;
   if (sel && sel.end - sel.start > 0.001) {
-    playRegion(sel.start, sel.end, state.loop);
+    playRegion(sel.start, sel.end, state.loop, { reverse: state.reverse, follow: true });
   } else {
-    playRegion(state.cursor, null, false);
+    playRegion(state.cursor, null, false, { reverse: state.reverse });
   }
 }
 
@@ -614,6 +737,7 @@ waveCv.addEventListener('pointermove', (e) => {
     state.selection = { start: Math.min(drag.anchor, t), end: Math.max(drag.anchor, t) };
   }
   syncSelection();
+  refreshLoopRegion();
   draw();
 });
 
@@ -687,6 +811,7 @@ function readSelectionInputs() {
   if (!isFinite(a) || !isFinite(b) || b <= a) return;
   state.selection = { start: Math.max(0, a), end: Math.min(state.buffer.duration, b) };
   syncSelection();
+  refreshLoopRegion();
   draw();
 }
 
@@ -719,6 +844,7 @@ function addSlice(start, end, name) {
     start_sec: start,
     end_sec: end,
     color: PALETTE[slices.length % PALETTE.length],
+    reverse: state.reverse,
   });
   slices.sort((a, b) => a.start_sec - b.start_sec);
   renderSlices();
@@ -741,7 +867,9 @@ function playSlice(i, loop) {
   const s = state.project && state.project.slices[i];
   if (!s) return;
   state.activeSlice = i;
-  playRegion(s.start_sec, s.end_sec, loop);
+  // A slice carries its own reverse flag. That is what gets exported, so it is
+  // also what you should hear when you trigger it.
+  playRegion(s.start_sec, s.end_sec, loop, { reverse: !!s.reverse });
   renderSlices();
 }
 
@@ -764,6 +892,9 @@ function renderSlices() {
       <td class="c-t"><input data-f="end" class="mono" value="${s.end_sec.toFixed(3)}"></td>
       <td class="c-t mono">${(s.end_sec - s.start_sec).toFixed(3)}</td>
       <td class="c-bars">${fmtBars(s.end_sec - s.start_sec)}</td>
+      <td class="c-rev">
+        <button class="btn btn-sq toggle${s.reverse ? ' on' : ''}" data-a="rev" title="Play and export this chop backwards">◀</button>
+      </td>
       <td class="c-act">
         <button class="btn btn-sq" data-a="play" title="Play">▶</button>
         <button class="btn btn-sq" data-a="loop" title="Loop">↻</button>
@@ -792,6 +923,11 @@ function renderSlices() {
       });
     });
 
+    tr.querySelector('[data-a=rev]').addEventListener('click', () => {
+      s.reverse = !s.reverse;
+      markDirty();
+      renderSlices();
+    });
     tr.querySelector('[data-a=play]').addEventListener('click', () => playSlice(i, false));
     tr.querySelector('[data-a=loop]').addEventListener('click', () => playSlice(i, true));
     tr.querySelector('[data-a=del]').addEventListener('click', () => {
@@ -911,6 +1047,7 @@ function transientChop() {
 function syncTransport() {
   $('#btn-play').textContent = state.playing ? 'Pause' : 'Play';
   $('#btn-loop').classList.toggle('on', state.loop);
+  $('#btn-reverse').classList.toggle('on', state.reverse);
 }
 
 $('#btn-play').addEventListener('click', togglePlay);
@@ -918,8 +1055,18 @@ $('#btn-stop').addEventListener('click', () => { stopAudio(); draw(); });
 $('#btn-loop').addEventListener('click', () => {
   state.loop = !state.loop;
   syncTransport();
-  if (state.playing && state.playRegion && !state.playRegion.loop === state.loop) {
-    playRegion(state.playRegion.start, state.playRegion.end, state.loop);
+  const r = state.playRegion;
+  if (state.playing && r && r.loop !== state.loop) {
+    playRegion(r.start, r.end, state.loop, { reverse: r.reverse, follow: r.follow });
+  }
+});
+
+$('#btn-reverse').addEventListener('click', () => {
+  state.reverse = !state.reverse;
+  syncTransport();
+  const r = state.playRegion;
+  if (state.playing && r && r.follow) {
+    playRegion(r.start, r.end, r.loop, { reverse: state.reverse, follow: true });
   }
 });
 
@@ -935,15 +1082,77 @@ $('#rate').addEventListener('input', (e) => {
 
 function applyRate() {
   $('#rate-val').textContent = `${state.rate.toFixed(3)}×`;
+
+  // In tied mode the speed slider is already moving the pitch, so show what it costs.
+  // In free mode the pitch slider owns that, so this readout would just be a lie.
   const semi = 12 * Math.log2(state.rate);
-  $('#rate-semi').textContent = Math.abs(semi) < 0.005 ? '' : `${semi > 0 ? '+' : ''}${semi.toFixed(2)} st`;
+  $('#rate-semi').textContent = (!state.pitchLinked || Math.abs(semi) < 0.005)
+    ? '' : `${semi > 0 ? '+' : ''}${semi.toFixed(2)} st`;
+
   if (node) {
-    // Re-anchor so the playhead does not jump when the rate changes mid playback.
-    if (state.playing && actx) {
-      state.playAnchorBuf = playheadTime();
+    // Re-anchor first, or the playhead jumps when the rate changes mid playback.
+    if (state.playing && actx && state.playRegion) {
+      const k = timeScale();
+      const buf = activeBuffer(state.playRegion.reverse);
+      const head = playheadTime();
+      state.playAnchorBuf = state.playRegion.reverse ? buf.duration - head * k : head * k;
       state.playAnchorCtx = actx.currentTime;
     }
-    node.playbackRate.value = state.rate;
+    node.playbackRate.value = nodeRate();
+  }
+}
+
+$('#pitch').addEventListener('input', (e) => {
+  state.pitch = parseFloat(e.target.value);
+  paintPitchLabel();
+});
+// The stretch is expensive, so only run it when the slider is let go.
+$('#pitch').addEventListener('change', () => applyPitch());
+
+$('#pitch-linked').addEventListener('change', (e) => {
+  state.pitchLinked = e.target.checked;
+  applyPitch();
+});
+
+function paintPitchLabel() {
+  const v = state.pitch;
+  $('#pitch-val').textContent = `${v > 0 ? '+' : ''}${v.toFixed(1)} st`;
+}
+
+async function applyPitch() {
+  if (!state.project) return;
+  paintPitchLabel();
+  state.project.pitch = state.pitch;
+  state.project.pitch_linked = state.pitchLinked;
+  state.bufPitchRev = null;
+
+  if (!state.pitch || state.pitchLinked) {
+    // Nothing to render. Tied pitch is just playbackRate, same as a hardware sampler.
+    state.bufPitch = null;
+    state.pitchCacheFor = null;
+  } else if (state.pitchCacheFor !== state.pitch) {
+    busy(true, 'Pitching…', 'Time stretching the audio so the pitch moves without dragging the tempo with it.');
+    await new Promise((r) => setTimeout(r, 20));
+    try {
+      state.bufPitch = timeStretch(state.buffer, pitchRatio());
+      state.pitchCacheFor = state.pitch;
+    } catch (err) {
+      toast(err.message);
+      state.pitch = 0;
+      $('#pitch').value = '0';
+      paintPitchLabel();
+    } finally {
+      busy(false);
+    }
+  }
+
+  applyRate();
+  markDirty();
+
+  // The buffer under the node just changed, so it has to be restarted.
+  const r = state.playRegion;
+  if (state.playing && r) {
+    playRegion(r.start, r.end, r.loop, { reverse: r.reverse, follow: r.follow });
   }
 }
 
@@ -1079,6 +1288,7 @@ window.addEventListener('keydown', (e) => {
 
   const k = e.key.toLowerCase();
   if (k === 'l') { $('#btn-loop').click(); return; }
+  if (k === 'r') { $('#btn-reverse').click(); return; }
   if (k === 's') { sliceSelection(); return; }
   if (k === 'f') { fitView(); return; }
   if (k === '=' || k === '+') { zoomAt(state.cursor, 0.6); return; }
@@ -1110,6 +1320,7 @@ window.addEventListener('keydown', (e) => {
     if (e.key === '[') sel.start = Math.max(0, Math.min(sel.start + d, sel.end - 0.005));
     else sel.end = Math.min(state.buffer.duration, Math.max(sel.end + d, sel.start + 0.005));
     syncSelection();
+    refreshLoopRegion();
     markDirty();
     draw();
   }
@@ -1132,6 +1343,11 @@ async function loadSourceIntoEditor(src, project) {
     state.buffer = buf;
     state.peaks = buildPeaks(buf);
     state.onsets = null;
+    state.env = null;
+    state.bufRev = null;
+    state.bufPitch = null;
+    state.bufPitchRev = null;
+    state.pitchCacheFor = null;
     state.cursor = 0;
     state.selection = null;
     state.activeSlice = -1;
@@ -1153,6 +1369,18 @@ async function loadSourceIntoEditor(src, project) {
     $('#bpm').value = (project.bpm || 0).toFixed(2);
     $('#offset').value = (project.grid_offset || 0).toFixed(3);
     $('#bpb').value = String(project.beats_per_bar || 4);
+
+    state.pitch = Number(project.pitch) || 0;
+    state.pitchLinked = !!project.pitch_linked;
+    state.reverse = false;
+    $('#pitch').value = String(state.pitch);
+    $('#pitch-linked').checked = state.pitchLinked;
+    paintPitchLabel();
+    if (state.pitch && !state.pitchLinked) {
+      state.bufPitch = timeStretch(buf, pitchRatio());
+      state.pitchCacheFor = state.pitch;
+    }
+
     $('#save-state').textContent = 'saved';
     $('#save-state').classList.remove('dirty');
     $('#analysis').textContent = project.detected_key

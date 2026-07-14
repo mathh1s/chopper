@@ -359,3 +359,16 @@ table.slices td.c-t input { font-family: var(--mono); text-align: right; }
   .topbar-mid { order: 3; width: 100%; }
   #wave { height: 220px; }
 }
+
+/* ==== pitch, reverse, bake ==== */
+.pitch-mode { font-style: normal; display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; }
+.pitch-mode input { width: auto; min-width: 0; padding: 0; margin: 0; accent-color: var(--ink); }
+.pitch-mode label { font-size: 10px; text-transform: none; letter-spacing: 0; cursor: pointer; }
+.c-rev { width: 52px; }
+.c-rev .btn { padding: 4px 8px; min-width: 0; }
+.bake {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--ink-soft); font-weight: 600;
+  cursor: pointer; white-space: nowrap;
+}
+.bake input { width: auto; min-width: 0; padding: 0; accent-color: var(--ink); }

@@ -85,6 +85,7 @@
           <button class="btn btn-primary btn-play" id="btn-play">Play</button>
           <button class="btn" id="btn-stop">Stop</button>
           <button class="btn toggle" id="btn-loop">Loop</button>
+          <button class="btn toggle" id="btn-reverse">Reverse</button>
         </div>
 
         <div class="tp-group">
@@ -113,8 +114,18 @@
 
         <div class="tp-group">
           <label class="field">
-            <span>Rate <b id="rate-val" class="mono">1.000×</b> <em id="rate-semi" class="mono"></em></span>
+            <span>Speed <b id="rate-val" class="mono">1.000×</b> <em id="rate-semi" class="mono"></em></span>
             <input type="range" id="rate" min="0.5" max="2" step="0.001" value="1">
+          </label>
+          <label class="field">
+            <span>
+              Pitch <b id="pitch-val" class="mono">0.0 st</b>
+              <em class="pitch-mode">
+                <input type="checkbox" id="pitch-linked">
+                <label for="pitch-linked">tie to speed</label>
+              </em>
+            </span>
+            <input type="range" id="pitch" min="-24" max="24" step="0.5" value="0">
           </label>
           <label class="field">
             <span>Volume</span>
@@ -234,6 +245,7 @@
             <button class="btn" id="btn-export-cue">WAV with markers</button>
             <button class="btn btn-primary" id="btn-export-zip">Slice WAVs (zip)</button>
             <button class="btn" id="btn-download-src">Full WAV</button>
+            <label class="bake"><input type="checkbox" id="bake"> bake speed + pitch</label>
           </div>
         </div>
         <div class="table-wrap">
@@ -246,6 +258,7 @@
                 <th class="c-t">End</th>
                 <th class="c-t">Length</th>
                 <th class="c-bars">Bars</th>
+                <th class="c-rev">Rev</th>
                 <th class="c-act"></th>
               </tr>
             </thead>

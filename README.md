@@ -13,8 +13,13 @@ Go + Postgres on the back, Web Audio + canvas on the front. One binary, frontend
   when the detector locks onto the wrong metre.
 - **Chop.** Slice a selection, cut N even chops, cut on every bar or beat, or cut on
   transients. Everything snaps to the grid.
-- **Audition.** Sample accurate looping, pads on keys 1 to 9, and a rate slider that shows
-  you the semitone shift so you know what pitching it to your project tempo will cost.
+- **Audition.** Sample accurate looping that follows the selection while it plays, pads on
+  keys 1 to 9, and a speed slider that shows the semitone shift so you know what pitching it
+  to your project tempo will cost.
+- **Reverse and pitch.** Reverse is per chop, so it is remembered and it is what gets
+  exported. Pitch is in semitones and is free of the speed control by default: the audio is
+  time stretched underneath so the pitch moves and the tempo does not. Tick "tie to speed"
+  to get the old sampler behaviour where pitching up also speeds up.
 - **Export.** Timestamps to clipboard, JSON, Audacity labels, a wav with your slices
   embedded as cue markers and regions, or a zip of one wav per chop.
 - **Split stems** into drums, bass, vocals and other, if you install demucs. Each stem
@@ -73,6 +78,7 @@ and no more, so do not put it on a public URL and forget about it.
 | --- | --- |
 | `space` | play / pause (plays the selection if you have one) |
 | `L` | toggle loop |
+| `R` | toggle reverse |
 | `S` | slice the current selection |
 | `F` | fit the whole track |
 | `1` to `9`, `0` | trigger pad (hold shift to loop it) |

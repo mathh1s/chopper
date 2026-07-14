@@ -37,6 +37,7 @@ type Slice struct {
 	StartSec float64 `json:"start_sec"`
 	EndSec   float64 `json:"end_sec"`
 	Color    string  `json:"color"`
+	Reverse  bool    `json:"reverse"`
 }
 
 type Project struct {
@@ -47,6 +48,8 @@ type Project struct {
 	GridOffset  float64   `json:"grid_offset"`
 	BeatsPerBar int       `json:"beats_per_bar"`
 	DetectedKey string    `json:"detected_key"`
+	Pitch       float64   `json:"pitch"`
+	PitchLinked bool      `json:"pitch_linked"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	Slices      []Slice   `json:"slices"`
@@ -206,9 +209,9 @@ func (s *Store) CreateProject(ctx context.Context, sourceID int64, name string) 
 	err := s.pool.QueryRow(ctx, `
         insert into projects (source_id, name)
         values ($1, $2)
-        returning id, source_id, name, bpm, grid_offset, beats_per_bar, detected_key, created_at, updated_at`,
+        returning id, source_id, name, bpm, grid_offset, beats_per_bar, detected_key, pitch, pitch_linked, created_at, updated_at`,
 		sourceID, name).Scan(&p.ID, &p.SourceID, &p.Name, &p.BPM, &p.GridOffset,
-		&p.BeatsPerBar, &p.DetectedKey, &p.CreatedAt, &p.UpdatedAt)
+		&p.BeatsPerBar, &p.DetectedKey, &p.Pitch, &p.PitchLinked, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -218,7 +221,7 @@ func (s *Store) CreateProject(ctx context.Context, sourceID int64, name string) 
 
 func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 	rows, err := s.pool.Query(ctx, `
-        select id, source_id, name, bpm, grid_offset, beats_per_bar, detected_key, created_at, updated_at
+        select id, source_id, name, bpm, grid_offset, beats_per_bar, detected_key, pitch, pitch_linked, created_at, updated_at
         from projects order by updated_at desc`)
 	if err != nil {
 		return nil, err
@@ -229,7 +232,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 	for rows.Next() {
 		var p Project
 		err := rows.Scan(&p.ID, &p.SourceID, &p.Name, &p.BPM, &p.GridOffset,
-			&p.BeatsPerBar, &p.DetectedKey, &p.CreatedAt, &p.UpdatedAt)
+			&p.BeatsPerBar, &p.DetectedKey, &p.Pitch, &p.PitchLinked, &p.CreatedAt, &p.UpdatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -242,15 +245,15 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 func (s *Store) GetProject(ctx context.Context, id int64) (*Project, error) {
 	var p Project
 	err := s.pool.QueryRow(ctx, `
-        select id, source_id, name, bpm, grid_offset, beats_per_bar, detected_key, created_at, updated_at
+        select id, source_id, name, bpm, grid_offset, beats_per_bar, detected_key, pitch, pitch_linked, created_at, updated_at
         from projects where id = $1`, id).Scan(&p.ID, &p.SourceID, &p.Name, &p.BPM, &p.GridOffset,
-		&p.BeatsPerBar, &p.DetectedKey, &p.CreatedAt, &p.UpdatedAt)
+		&p.BeatsPerBar, &p.DetectedKey, &p.Pitch, &p.PitchLinked, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 
 	rows, err := s.pool.Query(ctx, `
-        select id, idx, name, start_sec, end_sec, color
+        select id, idx, name, start_sec, end_sec, color, reverse
         from slices where project_id = $1 order by idx asc`, id)
 	if err != nil {
 		return nil, err
@@ -260,7 +263,7 @@ func (s *Store) GetProject(ctx context.Context, id int64) (*Project, error) {
 	p.Slices = []Slice{}
 	for rows.Next() {
 		var sl Slice
-		if err := rows.Scan(&sl.ID, &sl.Idx, &sl.Name, &sl.StartSec, &sl.EndSec, &sl.Color); err != nil {
+		if err := rows.Scan(&sl.ID, &sl.Idx, &sl.Name, &sl.StartSec, &sl.EndSec, &sl.Color, &sl.Reverse); err != nil {
 			return nil, err
 		}
 		p.Slices = append(p.Slices, sl)
@@ -288,9 +291,9 @@ func (s *Store) SaveProject(ctx context.Context, p Project) (*Project, error) {
 	tag, err := tx.Exec(ctx, `
         update projects
         set name = $2, bpm = $3, grid_offset = $4, beats_per_bar = $5,
-            detected_key = $6, updated_at = now()
+            detected_key = $6, pitch = $7, pitch_linked = $8, updated_at = now()
         where id = $1`,
-		p.ID, p.Name, p.BPM, p.GridOffset, p.BeatsPerBar, p.DetectedKey)
+		p.ID, p.Name, p.BPM, p.GridOffset, p.BeatsPerBar, p.DetectedKey, p.Pitch, p.PitchLinked)
 	if err != nil {
 		return nil, err
 	}
@@ -304,9 +307,9 @@ func (s *Store) SaveProject(ctx context.Context, p Project) (*Project, error) {
 
 	for i, sl := range p.Slices {
 		_, err := tx.Exec(ctx, `
-            insert into slices (project_id, idx, name, start_sec, end_sec, color)
-            values ($1, $2, $3, $4, $5, $6)`,
-			p.ID, i, sl.Name, sl.StartSec, sl.EndSec, sl.Color)
+            insert into slices (project_id, idx, name, start_sec, end_sec, color, reverse)
+            values ($1, $2, $3, $4, $5, $6, $7)`,
+			p.ID, i, sl.Name, sl.StartSec, sl.EndSec, sl.Color, sl.Reverse)
 		if err != nil {
 			return nil, err
 		}

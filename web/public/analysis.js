@@ -74,6 +74,101 @@ function hann(n) {
   return w;
 }
 
+/* ==== time stretching (wsola) ====
+
+   Lengthen or shorten audio by factor k without touching the pitch. Chop the input
+   into overlapping frames, then lay them back down at a different spacing. The catch
+   is that a naive relaying makes the waveforms fight each other at the seams and you
+   get that hollow, phasey sound. WSOLA fixes it by nudging each frame a few hundred
+   samples either way to find the spot where it lines up best with what came before.
+
+   The search is the expensive part, so it runs decimated first and then refines. */
+
+function timeStretch(buf, k) {
+  if (!buf || Math.abs(k - 1) < 1e-6) return buf;
+  ensureCtx();
+
+  const sr = buf.sampleRate;
+  const nch = buf.numberOfChannels;
+  const inLen = buf.length;
+
+  const N = 2048;                            // frame
+  const Hs = N >> 1;                         // synthesis hop
+  const Ha = Math.max(1, Math.round(Hs / k)); // analysis hop
+  const SEEK = 512;                          // how far we may nudge a frame
+  const CORR = 256;                          // correlation window
+  const DEC = 4;                             // decimation for the coarse pass
+
+  const outLen = Math.ceil(inLen * k) + N;
+  const win = hann(N);
+  const ref = nch > 1 ? monoMix(buf) : buf.getChannelData(0);
+
+  const chans = [];
+  for (let c = 0; c < nch; c++) chans.push(buf.getChannelData(c));
+  const out = [];
+  for (let c = 0; c < nch; c++) out.push(new Float32Array(outLen));
+  const norm = new Float32Array(outLen);
+
+  let ana = 0;
+  let syn = 0;
+  let expect = 0; // where the previous frame would have carried on to
+
+  while (ana + N < inLen && syn + N < outLen) {
+    let pos = ana;
+
+    if (syn > 0 && expect + CORR < inLen) {
+      let bestOff = 0;
+      let best = -Infinity;
+      for (let off = -SEEK; off <= SEEK; off += DEC) {
+        const q = ana + off;
+        if (q < 0 || q + CORR >= inLen) continue;
+        let acc = 0;
+        for (let i = 0; i < CORR; i += DEC) acc += ref[q + i] * ref[expect + i];
+        if (acc > best) { best = acc; bestOff = off; }
+      }
+      let fine = bestOff;
+      let bestFine = -Infinity;
+      for (let off = bestOff - DEC; off <= bestOff + DEC; off++) {
+        const q = ana + off;
+        if (q < 0 || q + CORR >= inLen) continue;
+        let acc = 0;
+        for (let i = 0; i < CORR; i++) acc += ref[q + i] * ref[expect + i];
+        if (acc > bestFine) { bestFine = acc; fine = off; }
+      }
+      pos = Math.max(0, Math.min(inLen - N - 1, ana + fine));
+    }
+
+    for (let c = 0; c < nch; c++) {
+      const src = chans[c];
+      const dst = out[c];
+      for (let i = 0; i < N; i++) {
+        const si = pos + i;
+        if (si >= inLen) break;
+        dst[syn + i] += src[si] * win[i];
+      }
+    }
+    for (let i = 0; i < N; i++) norm[syn + i] += win[i];
+
+    expect = pos + Hs;
+    if (expect + CORR >= inLen) expect = Math.max(0, inLen - CORR - 1);
+    syn += Hs;
+    ana += Ha;
+  }
+
+  for (let c = 0; c < nch; c++) {
+    const d = out[c];
+    for (let i = 0; i < outLen; i++) {
+      const n = norm[i];
+      if (n > 1e-6) d[i] /= n;
+    }
+  }
+
+  const frames = Math.max(1, Math.min(outLen, Math.round(inLen * k)));
+  const ab = actx.createBuffer(nch, frames, sr);
+  for (let c = 0; c < nch; c++) ab.copyToChannel(out[c].subarray(0, frames), c);
+  return ab;
+}
+
 /* ==== onset envelope ==== */
 
 // Spectral flux. Rising energy per frequency bin is what a drum hit looks like.
@@ -526,6 +621,45 @@ function download(blob, name) {
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
+// Turn one slice into channel data, ready for the wav encoder.
+// Reverse is a property of the slice, so it is always applied. Speed and pitch are
+// preview controls, so they are only applied when the bake box is ticked.
+async function renderSliceBuffer(s) {
+  const bake = $('#bake').checked;
+  const rev = !!s.reverse;
+
+  if (!bake) {
+    const src = activeBufferPlain(rev);
+    const span = regionInBuffer(s.start_sec, s.end_sec, rev, src);
+    return sliceChannels(src, span.a, span.b);
+  }
+
+  const buf = activeBuffer(rev);
+  const span = regionInBuffer(s.start_sec, s.end_sec, rev, buf);
+  const rate = nodeRate();
+  const sr = buf.sampleRate;
+  const frames = Math.max(1, Math.round(((span.b - span.a) / rate) * sr));
+
+  const oc = new OfflineAudioContext(buf.numberOfChannels, frames, sr);
+  const src = oc.createBufferSource();
+  src.buffer = buf;
+  src.playbackRate.value = rate;
+  src.connect(oc.destination);
+  src.start(0, span.a, span.b - span.a);
+
+  const done = await oc.startRendering();
+  const chans = [];
+  for (let c = 0; c < done.numberOfChannels; c++) chans.push(done.getChannelData(c));
+  return { chans, sampleRate: sr, len: done.length };
+}
+
+// The unpitched buffer, forward or reversed. Used when not baking.
+function activeBufferPlain(reverse) {
+  if (!reverse) return state.buffer;
+  if (!state.bufRev) state.bufRev = reverseBuffer(state.buffer);
+  return state.bufRev;
+}
+
 function requireSlices() {
   if (!state.project || !state.project.slices.length) {
     toast('Cut some slices first.');
@@ -545,7 +679,7 @@ function timestampText() {
   s.forEach((sl, i) => {
     const len = sl.end_sec - sl.start_sec;
     lines.push(
-      `${String(i + 1).padStart(2, '0')}  ${fmtTime(sl.start_sec)}  ${fmtTime(sl.end_sec)}  ${len.toFixed(3)}s  ${fmtBars(len)}  ${sl.name}`
+      `${String(i + 1).padStart(2, '0')}  ${fmtTime(sl.start_sec)}  ${fmtTime(sl.end_sec)}  ${len.toFixed(3)}s  ${fmtBars(len)}  ${sl.reverse ? '[rev] ' : ''}${sl.name}`
     );
   });
   lines.push('', 'raw seconds:');
@@ -585,6 +719,7 @@ $('#btn-export-json').addEventListener('click', () => {
       start: Number(s.start_sec.toFixed(4)),
       end: Number(s.end_sec.toFixed(4)),
       length: Number((s.end_sec - s.start_sec).toFixed(4)),
+      reverse: !!s.reverse,
       start_sample: Math.round(s.start_sec * state.buffer.sampleRate),
       end_sample: Math.round(s.end_sec * state.buffer.sampleRate),
     })),
@@ -629,32 +764,39 @@ $('#btn-export-cue').addEventListener('click', () => {
   }, 30);
 });
 
-$('#btn-export-zip').addEventListener('click', () => {
+$('#btn-export-zip').addEventListener('click', async () => {
   const slices = requireSlices();
   if (!slices) return;
-  busy(true, 'Rendering slices…', `${slices.length} wav files, one per chop.`);
-  setTimeout(() => {
-    try {
-      const files = slices.map((s, i) => {
-        const { chans, sampleRate } = sliceChannels(state.buffer, s.start_sec, s.end_sec);
-        const wav = encodeWav(chans, sampleRate, null);
-        const name = `${String(i + 1).padStart(2, '0')}_${slugify(s.name, 'chop')}.wav`;
-        return { name, data: wav };
-      });
+  const bake = $('#bake').checked;
+  busy(true, 'Rendering slices…',
+    `${slices.length} wav files, one per chop${bake ? ', with speed and pitch baked in' : ''}.`);
+  await new Promise((r) => setTimeout(r, 30));
 
+  try {
+    const files = [];
+    for (let i = 0; i < slices.length; i++) {
+      const s = slices[i];
+      const { chans, sampleRate } = await renderSliceBuffer(s);
+      const wav = encodeWav(chans, sampleRate, null);
+      const rev = s.reverse ? '_rev' : '';
       files.push({
-        name: 'timestamps.txt',
-        data: new TextEncoder().encode(timestampText()),
+        name: `${String(i + 1).padStart(2, '0')}_${slugify(s.name, 'chop')}${rev}.wav`,
+        data: wav,
       });
-
-      download(makeZip(files), `${slugify(state.project.name, 'chops')}_slices.zip`);
-      toast(`Exported ${slices.length} slices.`);
-    } catch (err) {
-      toast(err.message);
-    } finally {
-      busy(false);
     }
-  }, 30);
+
+    files.push({
+      name: 'timestamps.txt',
+      data: new TextEncoder().encode(timestampText()),
+    });
+
+    download(makeZip(files), `${slugify(state.project.name, 'chops')}_slices.zip`);
+    toast(`Exported ${slices.length} slices.`);
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    busy(false);
+  }
 });
 
 $('#btn-download-src').addEventListener('click', () => {
