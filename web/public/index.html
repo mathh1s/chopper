@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chopper</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<div id="login" class="gate">
+  <form class="gate-card" id="login-form">
+    <div class="gate-mark">✂</div>
+    <h1>chopper</h1>
+    <p class="gate-sub">Sample chopping bench. Sign in to keep going.</p>
+    <input type="password" id="login-pass" placeholder="Password" autocomplete="current-password" required>
+    <button class="btn btn-primary" type="submit">Sign in</button>
+    <div class="gate-err" id="login-err"></div>
+  </form>
+</div>
+
+<div id="app" hidden>
+
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">✂</span> chopper</div>
+
+    <div class="topbar-mid">
+      <input id="project-name" class="project-name" placeholder="Untitled chop" spellcheck="false">
+      <span id="save-state" class="save-state">no project</span>
+    </div>
+
+    <div class="topbar-right">
+      <button class="btn" id="btn-library">Library</button>
+      <button class="btn btn-primary" id="btn-save">Save</button>
+      <button class="btn btn-ghost" id="btn-logout">Sign out</button>
+    </div>
+  </header>
+
+  <main class="editor">
+
+    <!-- empty state -->
+    <section id="empty" class="empty">
+      <h2>Load something to chop.</h2>
+      <div class="load-grid">
+        <div class="card load-card">
+          <h3>Paste a link</h3>
+          <p class="muted">YouTube, SoundCloud, Bandcamp, anything yt-dlp handles. The server pulls the best audio and converts it to wav.</p>
+          <input id="url-input" placeholder="https://www.youtube.com/watch?v=..." spellcheck="false">
+          <button class="btn btn-primary" id="btn-fetch">Fetch audio</button>
+        </div>
+        <div class="card load-card" id="drop">
+          <h3>Or drop a file</h3>
+          <p class="muted">mp3, wav, flac, m4a, opus. Dropped files are converted to wav and stored on the server.</p>
+          <input type="file" id="file-input" accept="audio/*,video/*" hidden>
+          <button class="btn" id="btn-pick">Choose file</button>
+          <div class="drop-hint">or drag it onto this card</div>
+        </div>
+      </div>
+      <div class="empty-err" id="load-err"></div>
+    </section>
+
+    <!-- workbench -->
+    <section id="bench" hidden>
+
+      <div class="card overview-card">
+        <canvas id="overview"></canvas>
+      </div>
+
+      <div class="card wave-card">
+        <canvas id="wave"></canvas>
+        <div class="wave-legend">
+          <span><kbd>space</kbd> play</span>
+          <span><kbd>L</kbd> loop</span>
+          <span><kbd>S</kbd> slice selection</span>
+          <span><kbd>1</kbd> to <kbd>9</kbd> trigger</span>
+          <span><kbd>scroll</kbd> pan · <kbd>ctrl</kbd>+<kbd>scroll</kbd> zoom</span>
+        </div>
+      </div>
+
+      <div class="transport card">
+        <div class="tp-group">
+          <button class="btn btn-primary btn-play" id="btn-play">Play</button>
+          <button class="btn" id="btn-stop">Stop</button>
+          <button class="btn toggle" id="btn-loop">Loop</button>
+        </div>
+
+        <div class="tp-group">
+          <label class="field">
+            <span>Selection</span>
+            <div class="sel-readout">
+              <input id="sel-start" class="mono" value="0.000">
+              <em>to</em>
+              <input id="sel-end" class="mono" value="0.000">
+            </div>
+          </label>
+          <div class="sel-meta" id="sel-meta">no selection</div>
+        </div>
+
+        <div class="tp-group">
+          <label class="field">
+            <span>Zoom</span>
+            <div class="row">
+              <button class="btn btn-sq" id="btn-zoom-out">−</button>
+              <button class="btn btn-sq" id="btn-zoom-in">+</button>
+              <button class="btn" id="btn-zoom-fit">Fit</button>
+              <button class="btn" id="btn-zoom-sel">To selection</button>
+            </div>
+          </label>
+        </div>
+
+        <div class="tp-group">
+          <label class="field">
+            <span>Rate <b id="rate-val" class="mono">1.000×</b> <em id="rate-semi" class="mono"></em></span>
+            <input type="range" id="rate" min="0.5" max="2" step="0.001" value="1">
+          </label>
+          <label class="field">
+            <span>Volume</span>
+            <input type="range" id="volume" min="0" max="1" step="0.01" value="0.9">
+          </label>
+        </div>
+      </div>
+
+      <div class="cols">
+
+        <div class="card grid-card">
+          <h3>Grid <span class="hint">so your chops land on the beat</span></h3>
+
+          <div class="grid-row">
+            <label class="field">
+              <span>BPM</span>
+              <input id="bpm" class="mono" type="number" step="0.01" min="0" value="0">
+            </label>
+            <label class="field">
+              <span>Offset (s)</span>
+              <input id="offset" class="mono" type="number" step="0.001" value="0">
+            </label>
+            <label class="field">
+              <span>Beats / bar</span>
+              <input id="bpb" class="mono" type="number" step="1" min="1" max="16" value="4">
+            </label>
+            <label class="field">
+              <span>Snap</span>
+              <select id="snap">
+                <option value="0">Off</option>
+                <option value="bar">Bar</option>
+                <option value="1">1/4 (beat)</option>
+                <option value="0.5">1/8</option>
+                <option value="0.25" selected>1/16</option>
+                <option value="0.125">1/32</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="grid-row">
+            <button class="btn" id="btn-detect">Detect BPM + downbeat</button>
+            <button class="btn" id="btn-tap">Tap tempo</button>
+            <button class="btn" id="btn-offset-here">Downbeat = cursor</button>
+            <button class="btn btn-sq" id="btn-half" title="Halve BPM">÷2</button>
+            <button class="btn btn-sq" id="btn-double" title="Double BPM">×2</button>
+          </div>
+
+          <div class="grid-row">
+            <label class="field">
+              <span>Target BPM (your FL project)</span>
+              <input id="target-bpm" class="mono" type="number" step="0.01" min="0" value="0">
+            </label>
+            <button class="btn" id="btn-match">Preview at target</button>
+          </div>
+
+          <div class="analysis" id="analysis">Run detect to fill this in.</div>
+        </div>
+
+        <div class="card chop-card">
+          <h3>Chop <span class="hint">selection first, then cut</span></h3>
+
+          <div class="grid-row">
+            <button class="btn btn-primary" id="btn-slice">Slice selection</button>
+            <button class="btn" id="btn-clear-slices">Clear all</button>
+          </div>
+
+          <div class="grid-row">
+            <label class="field">
+              <span>Even chops across selection</span>
+              <div class="row">
+                <input id="even-n" class="mono" type="number" min="1" max="128" value="8">
+                <button class="btn" id="btn-even">Cut</button>
+              </div>
+            </label>
+          </div>
+
+          <div class="grid-row">
+            <label class="field">
+              <span>Chop on grid, every</span>
+              <div class="row">
+                <select id="grid-div">
+                  <option value="bar">bar</option>
+                  <option value="1" selected>beat</option>
+                  <option value="0.5">1/8</option>
+                  <option value="0.25">1/16</option>
+                </select>
+                <button class="btn" id="btn-grid-chop">Cut</button>
+              </div>
+            </label>
+          </div>
+
+          <div class="grid-row">
+            <label class="field">
+              <span>Chop on transients <b id="sens-val" class="mono">0.30</b></span>
+              <div class="row">
+                <input type="range" id="sens" min="0.05" max="0.9" step="0.01" value="0.3">
+                <button class="btn" id="btn-transient">Cut</button>
+              </div>
+            </label>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="card pads-card">
+        <h3>Pads <span class="hint">click to trigger, hold shift to loop</span></h3>
+        <div class="pads" id="pads"></div>
+      </div>
+
+      <div class="card slices-card">
+        <div class="slices-head">
+          <h3>Slices <span class="hint" id="slice-count">0</span></h3>
+          <div class="row">
+            <button class="btn" id="btn-copy">Copy timestamps</button>
+            <button class="btn" id="btn-export-json">JSON</button>
+            <button class="btn" id="btn-export-labels">Audacity labels</button>
+            <button class="btn" id="btn-export-cue">WAV with markers</button>
+            <button class="btn btn-primary" id="btn-export-zip">Slice WAVs (zip)</button>
+            <button class="btn" id="btn-download-src">Full WAV</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="slices">
+            <thead>
+              <tr>
+                <th class="c-idx">#</th>
+                <th>Name</th>
+                <th class="c-t">Start</th>
+                <th class="c-t">End</th>
+                <th class="c-t">Length</th>
+                <th class="c-bars">Bars</th>
+                <th class="c-act"></th>
+              </tr>
+            </thead>
+            <tbody id="slice-rows"></tbody>
+          </table>
+          <div class="slices-empty" id="slices-empty">
+            Drag on the waveform to select a region, then hit <kbd>S</kbd>.
+          </div>
+        </div>
+      </div>
+
+    </section>
+  </main>
+
+  <!-- library drawer -->
+  <aside id="library" class="library" hidden>
+    <div class="lib-head">
+      <h2>Library</h2>
+      <button class="btn btn-ghost btn-sq" id="btn-close-lib">✕</button>
+    </div>
+
+    <div class="lib-section">
+      <h3>Projects</h3>
+      <div id="lib-projects" class="lib-list"></div>
+    </div>
+
+    <div class="lib-section">
+      <h3>Sources</h3>
+      <div id="lib-sources" class="lib-list"></div>
+    </div>
+
+    <div class="lib-section">
+      <button class="btn btn-primary" id="btn-new">Load something new</button>
+    </div>
+  </aside>
+  <div id="scrim" class="scrim" hidden></div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <div id="busy" class="busy" hidden>
+    <div class="busy-card">
+      <div class="spinner"></div>
+      <div id="busy-text">Working…</div>
+      <div class="busy-sub" id="busy-sub"></div>
+    </div>
+  </div>
+
+</div>
+
+<script src="/app.js"></script>
+<script src="/analysis.js"></script>
+</body>
+</html>
