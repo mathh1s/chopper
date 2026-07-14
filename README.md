@@ -43,7 +43,6 @@ building if you would rather have a small image and no stem splitting.
 
 Needs `ffmpeg`, `ffprobe` and `yt-dlp` on PATH, plus a Postgres database.
 
-    go mod download          # writes go.sum on first build
     go build -o chopper ./cmd/server
     cp .env.example .env     # fill it in
     set -a; source .env; set +a

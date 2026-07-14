@@ -1,6 +1,10 @@
 FROM golang:1.22-bookworm AS build
 WORKDIR /src
-COPY go.mod go.sum* ./
+# go.sum is committed and not optional. Without it, go build under the default
+# -mod=readonly fails with "missing go.sum entry", because go mod download only
+# records go.mod hashes and not module content hashes. Copy it explicitly so a
+# missing one fails loudly here rather than confusingly three lines down.
+COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/chopper ./cmd/server

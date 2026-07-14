@@ -1,0 +1,18 @@
+# Never let secrets or local state into the build context. COPY . . would
+# otherwise pull .env straight into the builder image.
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+
+# Local state and build output.
+data/
+chopper
+*.log
+
+# Not needed to build.
+deploy/
+scripts/
+README.md
