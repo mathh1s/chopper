@@ -40,6 +40,7 @@ services:
       FFPROBE_BIN: ${FFPROBE_BIN:-ffprobe}
       DEMUCS_BIN: ${DEMUCS_BIN:-demucs}
       DEMUCS_MODEL: ${DEMUCS_MODEL:-htdemucs}
+      DEMUCS_SEGMENT: ${DEMUCS_SEGMENT:-}
     volumes:
       - audio:${DATA_DIR:-/data}
     ports:

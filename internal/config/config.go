@@ -20,6 +20,7 @@ type Config struct {
 	FFprobe        string
 	Demucs         string
 	DemucsModel    string
+	DemucsSegment  string
 	MaxUploadBytes int64
 	SecureCookie   bool
 }
@@ -43,6 +44,7 @@ func Load() Config {
 		FFprobe:        env("FFPROBE_BIN", "ffprobe"),
 		Demucs:         env("DEMUCS_BIN", ""),
 		DemucsModel:    env("DEMUCS_MODEL", "htdemucs"),
+		DemucsSegment:  env("DEMUCS_SEGMENT", ""),
 		MaxUploadBytes: int64(envInt("MAX_UPLOAD_MB", 300)) * 1024 * 1024,
 		SecureCookie:   env("SECURE_COOKIE", "true") == "true",
 	}

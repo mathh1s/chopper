@@ -162,8 +162,19 @@ func (m *Media) Stems(ctx context.Context, sourceFile string) (map[string]*Info,
 	defer cancel()
 
 	in := filepath.Join(m.cfg.AudioDir(), sourceFile)
-	if _, err := run(sepCtx, m.cfg.Demucs,
-		"-n", m.cfg.DemucsModel, "--wav", "-o", dir, in); err != nil {
+
+	// No --wav flag. Wav is already the default output in demucs 4.x, and passing
+	// --wav just gets you a usage error. --float32 keeps the intermediate clean,
+	// the normalise pass below takes it down to 16 bit anyway.
+	args := []string{"-n", m.cfg.DemucsModel, "--float32", "-o", dir}
+	if m.cfg.DemucsSegment != "" {
+		// Smaller segments mean less ram at some cost in quality. Reach for this
+		// when the oom killer is eating the run.
+		args = append(args, "--segment", m.cfg.DemucsSegment)
+	}
+	args = append(args, in)
+
+	if _, err := run(sepCtx, m.cfg.Demucs, args...); err != nil {
 		// A demucs run on cpu wants several gigabytes of ram for a full length
 		// track. When the kernel oom killer takes it there is no stderr at all,
 		// just a dead process, so say so rather than showing an empty error.
