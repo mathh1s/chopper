@@ -22,9 +22,10 @@ RUN pip install --no-cache-dir yt-dlp \
 WORKDIR /app
 COPY --from=build /out/chopper /app/chopper
 
-ENV ADDR=:8080
+# No ENV ADDR and no EXPOSE on purpose. The listen port is random per deployment
+# and comes from .env through compose, so anything baked in here would only ever
+# be a stale lie. If ADDR is unset the server falls back to :8080.
 ENV DATA_DIR=/data
 VOLUME ["/data"]
-EXPOSE 8080
 
 ENTRYPOINT ["/app/chopper"]
