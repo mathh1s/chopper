@@ -20,8 +20,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir yt-dlp
-
 # demucs does not list numpy as a dependency, and torch treats it as optional,
 # so a plain "pip install demucs" gives you a torch that cannot initialise numpy
 # and a demucs that dies on import. Install it explicitly. Pinned under 2.0
@@ -36,6 +34,13 @@ RUN if [ "$WITH_DEMUCS" = "1" ]; then \
         && python -c "from demucs.pretrained import get_model; get_model('htdemucs')" \
         && python -c "import numpy, torch; torch.zeros(1).numpy(); print('numpy ok', numpy.__version__)" ; \
     fi
+
+# Installed after demucs so bumping yt-dlp does not rebuild the torch layer.
+# YouTube needs a JS runtime (deno) plus the yt-dlp-ejs solver from the default
+# extra, without them format urls come back unsigned and fail with 403.
+COPY --from=denoland/deno:bin /deno /usr/local/bin/deno
+RUN pip install --no-cache-dir -U "yt-dlp[default]" \
+    && yt-dlp --version && deno --version
 
 WORKDIR /app
 COPY --from=build /out/chopper /app/chopper
