@@ -20,7 +20,8 @@ const perf = {
   countIn: true,
 };
 
-const voices = new Set();
+// voice node -> its gain, so a held key can fade its own voice out on release
+const voices = new Map();
 
 /* ==== voices ==== */
 
@@ -87,12 +88,24 @@ function playVoice(sliceIdx, when) {
     try { n.disconnect(); g.disconnect(); } catch (_) { /* already gone */ }
     voices.delete(n);
   };
-  voices.add(n);
+  voices.set(n, g);
   return n;
 }
 
+// Key released: cut the voice with a short fade instead of letting the chop ring out.
+function releaseVoice(n) {
+  const g = voices.get(n);
+  if (!g) return;
+  const t = actx.currentTime;
+  const fade = 0.008;
+  g.gain.cancelScheduledValues(t);
+  g.gain.setValueAtTime(g.gain.value, t);
+  g.gain.linearRampToValueAtTime(0, t + fade);
+  try { n.stop(t + fade); } catch (_) { /* already gone */ }
+}
+
 function stopAllVoices() {
-  for (const n of voices) {
+  for (const n of voices.keys()) {
     try { n.onended = null; n.stop(); n.disconnect(); } catch (_) { /* already gone */ }
   }
   voices.clear();

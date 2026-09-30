@@ -932,23 +932,30 @@ function selectSlice(i, alsoSelect) {
   draw();
 }
 
+// Returns a function that stops what this trigger started, for keys that gate on release.
 function playSlice(i, loop) {
   const s = state.project && state.project.slices[i];
-  if (!s) return;
+  if (!s) return null;
   state.activeSlice = i;
 
+  let release;
   if (loop) {
     // Holding shift loops a chop for auditioning, which is a solo activity, so it
     // takes over the mono preview node.
     if (s.source_id !== state.activeSourceId) switchSource(s.source_id);
     playRegion(s.start_sec, s.end_sec, true, { reverse: !!s.reverse });
+    const mine = node;
+    // Only stop the preview if nothing else has taken it over since.
+    release = () => { if (mine && node === mine) { stopAudio(); draw(); } };
   } else {
     // A plain trigger is a voice. It layers over whatever else is ringing, which is
     // the whole point of a pad bank.
-    playVoice(i, 0);
+    const v = playVoice(i, 0);
     if (state.recording) recordHit(i);
+    release = () => { if (v) releaseVoice(v); };
   }
   renderSlices();
+  return release;
 }
 
 function renderSlices() {
@@ -1415,6 +1422,20 @@ function dropOrphanEvents() {
 
 /* ==== keyboard ==== */
 
+// key code -> release function of the chop that key is holding
+const heldKeys = new Map();
+
+function releaseKey(code) {
+  const release = heldKeys.get(code);
+  if (!release) return;
+  heldKeys.delete(code);
+  release();
+}
+
+window.addEventListener('keyup', (e) => releaseKey(e.code));
+// a key released while the tab is unfocused never sends keyup
+window.addEventListener('blur', () => { for (const code of [...heldKeys.keys()]) releaseKey(code); });
+
 window.addEventListener('keydown', (e) => {
   if ($('#login').hidden === false) return;
   const tag = document.activeElement && document.activeElement.tagName;
@@ -1445,9 +1466,13 @@ window.addEventListener('keydown', (e) => {
 
   if (/^[0-9]$/.test(e.key)) {
     const i = e.key === '0' ? 9 : parseInt(e.key, 10) - 1;
+    // Auto repeat would stack a fresh voice every few ms while the key is down.
+    if (e.repeat) return;
     if (state.project && state.project.slices[i]) {
       flashPad(i);
-      playSlice(i, e.shiftKey);
+      releaseKey(e.code);
+      const release = playSlice(i, e.shiftKey);
+      if (release) heldKeys.set(e.code, release);
     }
     return;
   }
