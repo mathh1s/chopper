@@ -20,7 +20,7 @@ const perf = {
   countIn: true,
 };
 
-// voice node -> its gain, so a held key can fade its own voice out on release
+// voice node -> { g, idx, t, dur }: the gain for release fades, the rest to place the cursor
 const voices = new Map();
 
 /* ==== voices ==== */
@@ -88,20 +88,55 @@ function playVoice(sliceIdx, when) {
     try { n.disconnect(); g.disconnect(); } catch (_) { /* already gone */ }
     voices.delete(n);
   };
-  voices.set(n, g);
+  voices.set(n, { g, idx: sliceIdx, t, dur: plan.dur });
+  followVoices();
   return n;
 }
 
 // Key released: cut the voice with a short fade instead of letting the chop ring out.
 function releaseVoice(n) {
-  const g = voices.get(n);
-  if (!g) return;
+  const v = voices.get(n);
+  if (!v) return;
+  const g = v.g;
   const t = actx.currentTime;
   const fade = 0.008;
   g.gain.cancelScheduledValues(t);
   g.gain.setValueAtTime(g.gain.value, t);
   g.gain.linearRampToValueAtTime(0, t + fade);
   try { n.stop(t + fade); } catch (_) { /* already gone */ }
+}
+
+// Where the newest sounding voice on the shown source is, in original time. Voices
+// the loop scheduled ahead are in the map before they sound, hence the time check.
+function voiceHead() {
+  if (!actx || !state.project) return null;
+  const now = actx.currentTime;
+  let best = null;
+  for (const v of voices.values()) {
+    if (v.t > now || now >= v.t + v.dur) continue;
+    const s = state.project.slices[v.idx];
+    if (!s || s.source_id !== state.activeSourceId) continue;
+    if (!best || v.t > best.v.t) best = { v, s };
+  }
+  if (!best) return null;
+  const { v, s } = best;
+  const f = (now - v.t) / v.dur;
+  const len = s.end_sec - s.start_sec;
+  return s.reverse ? s.end_sec - f * len : s.start_sec + f * len;
+}
+
+let voiceRaf = 0;
+
+// The preview node has tick() for this. While it plays it owns the cursor.
+function followVoices() {
+  if (voiceRaf) return;
+  const step = () => {
+    if (!voices.size) { voiceRaf = 0; return; }
+    const t = state.playing ? null : voiceHead();
+    if (t != null) { state.cursor = t; draw(); }
+    voiceRaf = requestAnimationFrame(step);
+  };
+  voiceRaf = requestAnimationFrame(step);
 }
 
 function stopAllVoices() {
