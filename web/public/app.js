@@ -1196,8 +1196,17 @@ $('#rate').addEventListener('input', (e) => {
   applyRate();
 });
 
+$('#rate-val').addEventListener('change', (e) => {
+  const v = parseFloat(e.target.value);
+  if (Number.isFinite(v)) {
+    state.rate = Math.min(2, Math.max(0.5, v));
+    $('#rate').value = String(state.rate);
+  }
+  applyRate();
+});
+
 function applyRate() {
-  $('#rate-val').textContent = `${state.rate.toFixed(3)}×`;
+  $('#rate-val').value = state.rate.toFixed(3);
 
   // In tied mode the speed slider is already moving the pitch, so show what it costs.
   // In free mode the pitch slider owns that, so this readout would just be a lie.
@@ -1227,6 +1236,15 @@ $('#pitch').addEventListener('input', (e) => {
 // The stretch is expensive, so only run it when the slider is let go.
 $('#pitch').addEventListener('change', () => applyPitch());
 
+$('#pitch-val').addEventListener('change', (e) => {
+  const ps = activePS();
+  const v = parseFloat(e.target.value);
+  if (!ps || !Number.isFinite(v)) { paintPitchLabel(); return; }
+  ps.pitch = Math.min(24, Math.max(-24, v));
+  $('#pitch').value = String(ps.pitch);
+  applyPitch();
+});
+
 $('#pitch-linked').addEventListener('change', (e) => {
   state.pitchLinked = e.target.checked;
   applyPitch();
@@ -1235,7 +1253,7 @@ $('#pitch-linked').addEventListener('change', (e) => {
 function paintPitchLabel() {
   const ps = activePS();
   const v = ps ? Number(ps.pitch) || 0 : 0;
-  $('#pitch-val').textContent = `${v > 0 ? '+' : ''}${v.toFixed(1)} st`;
+  $('#pitch-val').value = v.toFixed(1);
 }
 
 async function applyPitch() {

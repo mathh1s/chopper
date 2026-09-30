@@ -117,6 +117,7 @@ input[type=number] { font-family: var(--mono); font-weight: 600; }
 
 .field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .field > span { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-soft); font-weight: 600; }
+input.num-inline { width: 6.5em; padding: 1px 5px; font-size: 11px; }
 .row { display: flex; gap: 6px; align-items: center; }
 .row > input { flex: 1; }
 
