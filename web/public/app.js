@@ -594,6 +594,7 @@ function drawRuler(ctx, w) {
 
 function drawSlices(ctx, w, h) {
   const all = state.project ? state.project.slices : [];
+  const prog = typeof voiceProgress === 'function' ? voiceProgress() : new Map();
   ctx.font = '600 10px Fredoka, sans-serif';
   ctx.textBaseline = 'top';
 
@@ -606,6 +607,13 @@ function drawSlices(ctx, w, h) {
 
     ctx.fillStyle = hexA(col, i === state.activeSlice ? 0.26 : 0.14);
     ctx.fillRect(x0, RULER, x1 - x0, h - RULER);
+
+    const p = prog.get(i);
+    if (p) {
+      const pw = (x1 - x0) * p.f;
+      ctx.fillStyle = hexA(col, 0.4);
+      ctx.fillRect(s.reverse ? x1 - pw : x0, RULER, pw, h - RULER);
+    }
 
     ctx.strokeStyle = col;
     ctx.lineWidth = i === state.activeSlice ? 2 : 1;

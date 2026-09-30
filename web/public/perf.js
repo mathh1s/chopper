@@ -106,34 +106,63 @@ function releaseVoice(n) {
   try { n.stop(t + fade); } catch (_) { /* already gone */ }
 }
 
-// Where the newest sounding voice on the shown source is, in original time. Voices
-// the loop scheduled ahead are in the map before they sound, hence the time check.
-function voiceHead() {
-  if (!actx || !state.project) return null;
+// slice index -> { f, t } for the newest sounding voice of each slice, f being how
+// far through it is. Voices the loop scheduled ahead are in the map before they
+// sound, hence the time check.
+function voiceProgress() {
+  const out = new Map();
+  if (!actx) return out;
   const now = actx.currentTime;
-  let best = null;
   for (const v of voices.values()) {
     if (v.t > now || now >= v.t + v.dur) continue;
-    const s = state.project.slices[v.idx];
+    const cur = out.get(v.idx);
+    if (!cur || v.t > cur.t) out.set(v.idx, { f: (now - v.t) / v.dur, t: v.t });
+  }
+  return out;
+}
+
+// Where the newest sounding voice on the shown source is, in original time.
+function voiceHead(prog) {
+  if (!state.project) return null;
+  let best = null;
+  for (const [idx, p] of prog) {
+    const s = state.project.slices[idx];
     if (!s || s.source_id !== state.activeSourceId) continue;
-    if (!best || v.t > best.v.t) best = { v, s };
+    if (!best || p.t > best.p.t) best = { p, s };
   }
   if (!best) return null;
-  const { v, s } = best;
-  const f = (now - v.t) / v.dur;
+  const { p, s } = best;
   const len = s.end_sec - s.start_sec;
-  return s.reverse ? s.end_sec - f * len : s.start_sec + f * len;
+  return s.reverse ? s.end_sec - p.f * len : s.start_sec + p.f * len;
+}
+
+function drawPadProgress(prog) {
+  for (const pad of document.querySelectorAll('#pads .pad')) {
+    const i = Number(pad.dataset.i);
+    const p = prog.get(i);
+    const s = state.project && state.project.slices[i];
+    const f = p ? p.f : 0;
+    pad.style.setProperty('--p', f);
+    pad.style.setProperty('--a', s && s.reverse ? 1 - f : 0);
+  }
 }
 
 let voiceRaf = 0;
 
-// The preview node has tick() for this. While it plays it owns the cursor.
+// The preview node has tick() for this. While it plays it owns the cursor and the
+// waveform redraw.
 function followVoices() {
   if (voiceRaf) return;
   const step = () => {
+    const prog = voiceProgress();
+    drawPadProgress(prog);
+    if (!state.playing) {
+      const t = voiceHead(prog);
+      if (t != null) state.cursor = t;
+      draw();
+    }
+    // One more frame after the last voice is gone, so its fill gets cleared.
     if (!voices.size) { voiceRaf = 0; return; }
-    const t = state.playing ? null : voiceHead();
-    if (t != null) { state.cursor = t; draw(); }
     voiceRaf = requestAnimationFrame(step);
   };
   voiceRaf = requestAnimationFrame(step);

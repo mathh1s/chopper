@@ -256,7 +256,19 @@ input[type=number] { font-family: var(--mono); font-weight: 600; }
   text-align: left;
   overflow: hidden;
   transition: transform .05s ease;
+  position: relative;
 }
+/* played part of the chop, driven by --a (left edge) and --p (width) from perf.js */
+.pad::before {
+  content: '';
+  position: absolute;
+  top: 0; bottom: 0;
+  left: calc(var(--a, 0) * 100%);
+  width: calc(var(--p, 0) * 100%);
+  background: rgba(28, 37, 71, 0.3);
+  pointer-events: none;
+}
+.pad > * { position: relative; }
 .pad:active, .pad.hit { transform: translateY(2px); box-shadow: none; filter: brightness(1.12); }
 .pad.empty { background: var(--panel-deep); color: var(--ink-soft); opacity: .6; cursor: default; }
 .pad-key { font-family: var(--mono); font-size: 10px; opacity: .7; }
