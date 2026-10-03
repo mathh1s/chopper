@@ -36,6 +36,7 @@ services:
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-300}
       SECURE_COOKIE: ${SECURE_COOKIE:-true}
       YTDLP_BIN: ${YTDLP_BIN:-yt-dlp}
+      YTDLP_COOKIES: ${YTDLP_COOKIES:-}
       FFMPEG_BIN: ${FFMPEG_BIN:-ffmpeg}
       FFPROBE_BIN: ${FFPROBE_BIN:-ffprobe}
       DEMUCS_BIN: ${DEMUCS_BIN:-demucs}
@@ -43,6 +44,7 @@ services:
       DEMUCS_SEGMENT: ${DEMUCS_SEGMENT:-}
     volumes:
       - audio:${DATA_DIR:-/data}
+      - ./cookies:/cookies:ro
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:?set APP_PORT in .env}:${APP_INTERNAL_PORT}"
 

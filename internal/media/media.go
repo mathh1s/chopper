@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -115,10 +116,18 @@ func (m *Media) FromURL(ctx context.Context, link string) (*Info, error) {
 	dlCtx, cancel := context.WithTimeout(ctx, 12*time.Minute)
 	defer cancel()
 
+	base := []string{"--no-playlist", "--no-warnings"}
+	cookies, err := m.cookiesCopy(dir)
+	if err != nil {
+		return nil, err
+	}
+	if cookies != "" {
+		base = append(base, "--cookies", cookies)
+	}
+
 	title := "Untitled"
 	titleOut, err := run(dlCtx, m.cfg.YtDlp,
-		"--no-playlist", "--no-warnings", "--skip-download",
-		"--print", "%(title)s", u.String())
+		slices.Concat(base, []string{"--skip-download", "--print", "%(title)s", u.String()})...)
 	if err == nil {
 		if t := strings.TrimSpace(firstLine(titleOut)); t != "" {
 			title = t
@@ -126,10 +135,18 @@ func (m *Media) FromURL(ctx context.Context, link string) (*Info, error) {
 	}
 
 	if _, err := run(dlCtx, m.cfg.YtDlp,
-		"--no-playlist", "--no-warnings", "--no-progress",
-		"-f", "bestaudio/best",
-		"-o", filepath.Join(dir, "input.%(ext)s"),
-		u.String()); err != nil {
+		slices.Concat(base, []string{"--no-progress",
+			"-f", "bestaudio/best",
+			"-o", filepath.Join(dir, "input.%(ext)s"),
+			u.String()})...); err != nil {
+		if strings.Contains(err.Error(), "not a bot") {
+			if cookies == "" {
+				return nil, errors.New("youtube is asking this server to sign in. " +
+					"export youtube cookies to a cookies.txt and point YTDLP_COOKIES at it")
+			}
+			return nil, errors.New("youtube rejected the cookies in YTDLP_COOKIES. " +
+				"they have most likely expired, export them again")
+		}
 		return nil, fmt.Errorf("download failed: %w", err)
 	}
 
@@ -144,6 +161,24 @@ func (m *Media) FromURL(ctx context.Context, link string) (*Info, error) {
 	}
 	info.Title = title
 	return info, nil
+}
+
+// cookiesCopy puts the configured cookies file into the job dir and returns its path,
+// or "" when none is configured. yt-dlp writes refreshed cookies back to the file it
+// was given, which fails on a read only mount and races when two downloads overlap.
+func (m *Media) cookiesCopy(dir string) (string, error) {
+	if m.cfg.YtDlpCookies == "" {
+		return "", nil
+	}
+	b, err := os.ReadFile(m.cfg.YtDlpCookies)
+	if err != nil {
+		return "", fmt.Errorf("YTDLP_COOKIES is set but unreadable: %w", err)
+	}
+	p := filepath.Join(dir, "cookies.txt")
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		return "", err
+	}
+	return p, nil
 }
 
 // Stems runs demucs and returns stem name to absolute wav path.

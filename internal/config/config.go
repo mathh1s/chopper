@@ -16,6 +16,7 @@ type Config struct {
 	AuthPassword   string
 	SessionSecret  string
 	YtDlp          string
+	YtDlpCookies   string
 	FFmpeg         string
 	FFprobe        string
 	Demucs         string
@@ -40,6 +41,7 @@ func Load() Config {
 		AuthPassword:   env("AUTH_PASSWORD", ""),
 		SessionSecret:  env("SESSION_SECRET", ""),
 		YtDlp:          env("YTDLP_BIN", "yt-dlp"),
+		YtDlpCookies:   env("YTDLP_COOKIES", ""),
 		FFmpeg:         env("FFMPEG_BIN", "ffmpeg"),
 		FFprobe:        env("FFPROBE_BIN", "ffprobe"),
 		Demucs:         env("DEMUCS_BIN", ""),

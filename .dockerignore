@@ -9,6 +9,7 @@
 
 # Local state and build output.
 data/
+cookies/
 chopper
 *.log
 
